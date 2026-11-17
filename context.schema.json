@@ -1,0 +1,6 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "title":"TacticAI Global Match Context",
+  "type":"object",
+  "properties":{"match":{"type":["object","null"]},"problems":{"type":"array"},"video":{"type":["object","null"]},"clips":{"type":"array"},"mission":{"type":["object","string","null"]},"analysis_plan":{"type":["object","null"]},"evidence_ledger":{"type":"array"},"pitch_calibration":{"type":["object","null"]}}
+}
