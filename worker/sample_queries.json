@@ -1,0 +1,7 @@
+[
+ {"query":"todas las pérdidas en salida","expected_event":"turnover"},
+ {"query":"todas las ocasiones","expected_event":"shot"},
+ {"query":"todas las recuperaciones altas","expected_event":"recovery"},
+ {"query":"todas las presiones tras pérdida","expected_event":"pressure"},
+ {"query":"todas las transiciones defensivas","expected_event":"transition"}
+]
