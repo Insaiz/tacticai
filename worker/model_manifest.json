@@ -1,0 +1,7 @@
+{
+  "name":"TacticAI football detector",
+  "default_repo":"hugosanchezgallego/futbol-detector-v4",
+  "default_filename":"best.pt",
+  "classes":["ball","player","referee"],
+  "notes":"Specialized football detector. Review runtime/framework licensing for commercial deployment."
+}
