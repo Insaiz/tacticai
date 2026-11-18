@@ -44,23 +44,41 @@ def update_context(j:str,payload:Dict[str,Any],request:Request):
 
 @app.post('/jobs/upload')
 async def upload(request:Request,file:UploadFile=File(...),project_id:str=Form(''),team:str=Form(''),opponent:str=Form(''),sample_fps:float=Form(2)):
+    j=project_id or str(uuid.uuid4())
     try:
         auth(request)
-        j=project_id or str(uuid.uuid4())
         job_dir(j).mkdir(parents=True,exist_ok=True)
         ext=Path(file.filename or 'video.mp4').suffix or '.mp4'
         src=job_dir(j)/('source'+ext)
-        with src.open('wb') as out:
-            shutil.copyfileobj(file.file,out)
+        try:
+            with src.open('wb') as out:
+                shutil.copyfileobj(file.file,out)
+        except Exception as e:
+            msg=f'file_save_error: {type(e).__name__}: {e}'
+            writej(j,{'id':j,'project_id':j,'status':'error','message':msg})
+            raise HTTPException(500,msg)
         old=readj(j) or {'id':j,'project_id':j,'context':{'manual_data':{},'problems':[],'chat':[],'clips':[],'evidence_ledger':[]}}
         old.update({'status':'queued','message':'Vídeo recibido','progress':0,'source':src.name,'sample_fps':sample_fps,'team':team,'opponent':opponent})
         old['context']['video']={'source':src.name,'team':team,'opponent':opponent}
         writej(j,old)
         import asyncio
-        asyncio.create_task(process(j,src,sample_fps,team,opponent))
+        try:
+            asyncio.create_task(process(j,src,sample_fps,team,opponent))
+        except Exception as e:
+            msg=f'queue_error: {type(e).__name__}: {e}'
+            old['status']='error';old['message']=msg;writej(j,old)
+            raise HTTPException(500,msg)
         return {'id':j,'project_id':j,'status':'queued'}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(500, f'Upload failed: {type(e).__name__}: {e}')
+        msg=f'upload_error: {type(e).__name__}: {e}'
+        try:
+            x=readj(j) or {'id':j,'project_id':j}
+            x['status']='error';x['message']=msg;writej(j,x)
+        except Exception:
+            pass
+        raise HTTPException(500,msg)
 
 async def process(j,src,fps,team,opp):
     x=readj(j);x['status']='processing';x['progress']=5;writej(j,x)
