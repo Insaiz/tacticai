@@ -48,6 +48,62 @@ def update_context(j:str,payload:Dict[str,Any],request:Request):
     if not x: raise HTTPException(404,'Project not found')
     c=x.get('context',{});c.update(payload);x['context']=c;writej(j,x);(job_dir(j)/'project_context.json').write_text(json.dumps(c,ensure_ascii=False,indent=2));return {'context':c}
 
+
+@app.post('/jobs/upload/init')
+def upload_init(request:Request, project_id:str=Form(''), team:str=Form(''), opponent:str=Form(''), sample_fps:float=Form(2), filename:str=Form('video.mp4'), total_chunks:int=Form(...)):
+    auth(request)
+    j=project_id or str(uuid.uuid4())
+    job_dir(j).mkdir(parents=True,exist_ok=True)
+    ext=Path(filename or 'video.mp4').suffix or '.mp4'
+    src=Path(tempfile.gettempdir())/('tacticai-'+j+ext)
+    try:
+        if src.exists(): src.unlink()
+    except Exception: pass
+    old=readj(j) or {'id':j,'project_id':j,'context':{'manual_data':{},'problems':[],'chat':[],'clips':[],'evidence_ledger':[]}}
+    old.update({'status':'uploading','message':'Preparando subida por bloques','progress':0,'source':src.name,'sample_fps':sample_fps,'team':team,'opponent':opponent,'upload_total_chunks':total_chunks,'upload_received_chunks':0})
+    old['context']['video']={'source':src.name,'team':team,'opponent':opponent}
+    writej(j,old)
+    src.touch()
+    return {'id':j,'project_id':j,'status':'uploading','total_chunks':total_chunks}
+
+@app.post('/jobs/{j}/upload/chunk')
+async def upload_chunk(j:str,request:Request,chunk:UploadFile=File(...),index:int=Form(...),total_chunks:int=Form(...)):
+    auth(request)
+    x=readj(j)
+    if not x: raise HTTPException(404,'Job not found')
+    src=Path(tempfile.gettempdir())/x.get('source','')
+    if not src.name: raise HTTPException(400,'Upload source not initialized')
+    if total_chunks != int(x.get('upload_total_chunks',total_chunks)): raise HTTPException(400,'Chunk total mismatch')
+    try:
+        data=await chunk.read()
+        mode='ab' if index>0 else 'wb'
+        with src.open(mode) as out: out.write(data)
+        x['upload_received_chunks']=max(int(x.get('upload_received_chunks',0)),index+1)
+        x['progress']=min(95,round(95*x['upload_received_chunks']/total_chunks))
+        x['message']=f'Bloque {index+1}/{total_chunks} recibido'
+        writej(j,x)
+        return {'ok':True,'id':j,'chunk':index,'received_chunks':x['upload_received_chunks'],'total_chunks':total_chunks}
+    except Exception as e:
+        raise HTTPException(500,f'chunk_save_error: {type(e).__name__}: {e}')
+
+@app.post('/jobs/{j}/upload/finalize')
+async def upload_finalize(j:str,request:Request):
+    auth(request)
+    x=readj(j)
+    if not x: raise HTTPException(404,'Job not found')
+    total=int(x.get('upload_total_chunks',0)); received=int(x.get('upload_received_chunks',0))
+    if total<=0 or received<total: raise HTTPException(409,f'Upload incomplete: {received}/{total} chunks')
+    src=Path(tempfile.gettempdir())/x.get('source','')
+    if not src.exists() or src.stat().st_size<=0: raise HTTPException(400,'Uploaded video is empty or missing')
+    x['status']='queued';x['message']='Vídeo recibido';x['progress']=0
+    writej(j,x)
+    import asyncio
+    try:
+        asyncio.create_task(process(j,src,float(x.get('sample_fps',2)),x.get('team',''),x.get('opponent','')))
+    except Exception as e:
+        x['status']='error';x['message']=f'queue_error: {type(e).__name__}: {e}';writej(j,x);raise HTTPException(500,x['message'])
+    return {'id':j,'project_id':j,'status':'queued'}
+
 @app.post('/jobs/upload')
 async def upload(request:Request,file:UploadFile=File(...),project_id:str=Form(''),team:str=Form(''),opponent:str=Form(''),sample_fps:float=Form(2)):
     j=project_id or str(uuid.uuid4())
