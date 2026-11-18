@@ -22,7 +22,7 @@ async function llm(key,model,instructions,payload){
  const j=await r.json();if(!r.ok)throw new Error(j.error?.message||('OpenAI '+r.status));return j.output_text||'';
 }
 function parse(t){try{return JSON.parse(t)}catch(e){const m=String(t||'').match(/\{[\s\S]*\}/);if(m)try{return JSON.parse(m[0])}catch(_){}return null}}
-exports.handler=async(event)=>{
+export const handler=async(event)=>{
  if(event.httpMethod==='OPTIONS')return{statusCode:204,headers:cors,body:''};
  if(event.httpMethod!=='POST')return json({error:'Método no permitido'},405);
  let b;try{b=JSON.parse(event.body||'{}')}catch(e){return json({error:'JSON inválido'},400)}
