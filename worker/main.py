@@ -44,15 +44,23 @@ def update_context(j:str,payload:Dict[str,Any],request:Request):
 
 @app.post('/jobs/upload')
 async def upload(request:Request,file:UploadFile=File(...),project_id:str=Form(''),team:str=Form(''),opponent:str=Form(''),sample_fps:float=Form(2)):
-    auth(request);j=project_id or str(uuid.uuid4());job_dir(j).mkdir(parents=True,exist_ok=True)
-    ext=Path(file.filename or 'video.mp4').suffix or '.mp4';src=job_dir(j)/('source'+ext)
-    with src.open('wb') as f: shutil.copyfileobj(file.file,f)
-    old=readj(j) or {'id':j,'project_id':j,'context':{'manual_data':{},'problems':[],'chat':[],'clips':[],'evidence_ledger':[]}}
-    old.update({'status':'queued','message':'Vídeo recibido','progress':0,'source':src.name,'sample_fps':sample_fps,'team':team,'opponent':opponent})
-    old['context']['video']={'source':src.name,'team':team,'opponent':opponent}
-    writej(j,old)
-    import asyncio;asyncio.create_task(process(j,src,sample_fps,team,opponent))
-    return {'id':j,'project_id':j,'status':'queued'}
+    try:
+        auth(request)
+        j=project_id or str(uuid.uuid4())
+        job_dir(j).mkdir(parents=True,exist_ok=True)
+        ext=Path(file.filename or 'video.mp4').suffix or '.mp4'
+        src=job_dir(j)/('source'+ext)
+        with src.open('wb') as out:
+            shutil.copyfileobj(file.file,out)
+        old=readj(j) or {'id':j,'project_id':j,'context':{'manual_data':{},'problems':[],'chat':[],'clips':[],'evidence_ledger':[]}}
+        old.update({'status':'queued','message':'Vídeo recibido','progress':0,'source':src.name,'sample_fps':sample_fps,'team':team,'opponent':opponent})
+        old['context']['video']={'source':src.name,'team':team,'opponent':opponent}
+        writej(j,old)
+        import asyncio
+        asyncio.create_task(process(j,src,sample_fps,team,opponent))
+        return {'id':j,'project_id':j,'status':'queued'}
+    except Exception as e:
+        raise HTTPException(500, f'Upload failed: {type(e).__name__}: {e}')
 
 async def process(j,src,fps,team,opp):
     x=readj(j);x['status']='processing';x['progress']=5;writej(j,x)
