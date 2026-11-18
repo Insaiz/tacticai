@@ -7,6 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from football_engine import build_analysis
 
 BASE=Path(os.getenv('TACTICAI_DATA','/data'));BASE.mkdir(parents=True,exist_ok=True)
+# Keep the small Railway volume for project metadata/artifacts, not raw video files.
+# Remove stale source videos left by previous failed uploads so the worker can recover from a full volume.
+for _p in BASE.glob('*/source*'):
+    try: _p.unlink()
+    except Exception: pass
+import tempfile
 TOKEN=os.getenv('TACTICAI_WORKER_TOKEN','')
 app=FastAPI(title='TacticAI Worker',version='1.8')
 app.add_middleware(CORSMiddleware,allow_origins=os.getenv('TACTICAI_CORS_ORIGINS','*').split(','),allow_methods=['*'],allow_headers=['*'])
@@ -49,7 +55,7 @@ async def upload(request:Request,file:UploadFile=File(...),project_id:str=Form('
         auth(request)
         job_dir(j).mkdir(parents=True,exist_ok=True)
         ext=Path(file.filename or 'video.mp4').suffix or '.mp4'
-        src=job_dir(j)/('source'+ext)
+        src=Path(tempfile.gettempdir())/('tacticai-'+j+ext)
         try:
             with src.open('wb') as out:
                 shutil.copyfileobj(file.file,out)
@@ -86,7 +92,10 @@ async def process(j,src,fps,team,opp):
         result=build_analysis(str(src),fps,team,opp)
         x=readj(j);x['status']='completed';x['progress']=100;x['message']='Análisis completado';x['result']=result
         c=x.get('context',{});c['video']=result;c['clips']=result.get('clips',[]);c['evidence_ledger']=result.get('evidence_ledger',[]);x['context']=c
-        writej(j,x);(job_dir(j)/'result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2))
+        writej(j,x)
+        try: src.unlink()
+        except Exception: pass
+        (job_dir(j)/'result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2))
         (job_dir(j)/'project_context.json').write_text(json.dumps(c,ensure_ascii=False,indent=2))
     except Exception as e:
         x=readj(j);x['status']='error';x['message']=str(e);writej(j,x)
