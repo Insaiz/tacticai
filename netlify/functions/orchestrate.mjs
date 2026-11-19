@@ -1,7 +1,9 @@
 const cors={'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'Content-Type','Access-Control-Allow-Methods':'POST,OPTIONS'};
 const json=(body,status=200)=>({statusCode:status,headers:{...cors,'Content-Type':'application/json'},body:JSON.stringify(body)});
+
 function makePlan(request,context){
- const q=request.toLowerCase();let intent='general_analysis',ops=['summarize_match_context'];
+ const q=request.toLowerCase();
+ let intent='general_analysis',ops=['summarize_match_context'];
  if(/pérdid|perdid|salida/.test(q)){intent='build_up_turnovers';ops=['find_turnovers_in_build_up'];}
  else if(/presión|pressing/.test(q)){intent='pressing';ops=['find_pressing_sequences'];}
  else if(/transición|contra/.test(q)){intent='transition';ops=['find_transition_sequences'];}
@@ -10,25 +12,78 @@ function makePlan(request,context){
  const video=/vídeo|video|clip|secuencia|localiza|ocurr|pérdid|presión|transición|tiro|ocasión|lateral|extremo|jugador/.test(q);
  return{request,intent,required_sources:video?['manual_data','video_events','clips']:['manual_data','diagnosis'],operations:ops,evidence_requirements:video?['timestamped_video_evidence','statistical_context']:['statistical_context'],execution:{needs_video:video,video_query:video?request:null}};
 }
-function localResponse(plan,c){
- const d=c.match||{};const p=(c.problems||[])[0];let answer='He revisado el contexto disponible. ';
- if(p)answer+='La prioridad actual es '+p.title+'. Antes de tratarla como causa confirmada, conviene contrastarla con evidencia temporal del vídeo.';
- else answer+='Todavía no hay un diagnóstico suficiente. Puedo cruzar los datos manuales con las secuencias del vídeo.';
- return{answer,diagnosis:p?{title:p.title,status:'hypothesis',evidence:[p.evidence],cause:p.cause||null,confidence:'medium'}:null,solution:p?.solution||'Buscar primero el patrón que explique el problema.',training_task:null,evidence_to_check:plan.evidence_requirements,follow_up:plan.execution.needs_video?'Puedo localizar las secuencias relevantes del vídeo.':'Añade vídeo si quieres validar el patrón temporal.',analysis_plan:{...plan,status:'planned'}};
+
+function videoEvidence(c){
+ const v=c.video||{},s=v.sequence||{};
+ return {
+   possession_episodes:(s.possession_episodes||[]).slice(0,80),
+   turnover_candidates:(s.turnover_candidates||[]).slice(0,80),
+   transition_candidates:(s.transition_candidates||[]).slice(0,80),
+   defensive_transition_candidates:(s.defensive_transition_candidates||[]).slice(0,80),
+   visual_facts:(s.visual_facts||[]).slice(0,80),
+   clips:(c.clips||v.clips||[]).slice(0,40)
+ };
 }
-function compact(c){return{match:c.match||null,problems:(c.problems||[]).slice(0,20),video:c.video||null,clips:(c.clips||[]).slice(0,30),evidence_ledger:(c.evidence_ledger||[]).slice(0,50),mission:c.mission||null};}
+
+function tacticalSynthesis(plan,c){
+ const v=videoEvidence(c),m=c.match||c.manual_data||{};
+ const turnovers=v.turnover_candidates||[], transitions=v.transition_candidates||[], clips=v.clips||[];
+ const facts=[],evidence=[],hypotheses=[];
+ if(m.score)facts.push({type:'fact',label:'Resultado',value:String(m.score),source:'manual_data'});
+ if(m.formation)facts.push({type:'fact',label:'Estructura inicial',value:String(m.formation),source:'manual_data'});
+ if(Number.isFinite(Number(m.losses)))facts.push({type:'fact',label:'Pérdidas registradas',value:Number(m.losses),source:'manual_data'});
+ if(turnovers.length){
+   evidence.push({type:'evidence',label:'Cambios de posesión candidatos',value:turnovers.length,source:'video.sequence.turnover_candidates',clip_refs:turnovers.map(x=>x.clip_id||x.id).filter(Boolean).slice(0,10)});
+   const byZone={};for(const t of turnovers){const z=t.zone||'unknown';byZone[z]=(byZone[z]||0)+1;}
+   const top=Object.entries(byZone).sort((a,b)=>b[1]-a[1])[0];
+   if(top)hypotheses.push({type:'hypothesis',label:'Concentración de pérdidas',value:top[0],count:top[1],confidence:'medium'});
+ }
+ if(transitions.length)evidence.push({type:'evidence',label:'Transiciones candidatas',value:transitions.length,source:'video.sequence.transition_candidates',clip_refs:transitions.map(x=>x.clip_id||x.id).filter(Boolean).slice(0,10)});
+ const askedRole=/lateral|extremo|mediocentro|central|delantero|jugador/.test(plan.request.toLowerCase());
+ let diagnosis=null,solution=null,task=null;
+ if(turnovers.length && transitions.length){
+   diagnosis={title:'Existe un patrón candidato de pérdida seguido de transición',status:'hypothesis',confidence:'medium',facts,evidence,hypotheses};
+   solution='Prioriza verificar qué ocurre en los 3–5 segundos posteriores a las pérdidas: distancia al balón, ocupación de carriles, protección del espacio central y velocidad de reacción.';
+   task={title:'Pérdida + transición defensiva',objective:'mejorar la reacción tras pérdida',format:'oleada 5v4+comodines o juego de posición con transición inmediata',coaching_points:['reacción del jugador más cercano','cerrar línea de pase interior','proteger profundidad antes de saltar','reorganización del lado débil'],evidence_basis:'video.sequence.turnover_candidates + transition_candidates'};
+ } else if(turnovers.length){
+   diagnosis={title:'Hay pérdidas candidatas detectadas, pero no basta para atribuir la causa',status:'hypothesis',confidence:'low-medium',facts,evidence,hypotheses};
+   solution='Revisar las pérdidas por zona y la secuencia inmediatamente anterior y posterior antes de señalar a un jugador concreto.';
+   task={title:'Pérdida y reacción',objective:'mejorar continuidad tras pérdida',format:'posesión con transición de 5–8 segundos',coaching_points:['distancia entre líneas','jugador más cercano al balón','cierre interior']};
+ } else if(askedRole){
+   diagnosis={title:'No hay evidencia de vídeo suficiente para confirmar un problema individual',status:'insufficient_evidence',confidence:'low',facts,evidence,hypotheses};
+   solution='No atribuir el problema al jugador todavía. Comparar sus acciones con la estructura colectiva y localizar secuencias concretas.';
+   task=null;
+ } else {
+   diagnosis={title:'Diagnóstico pendiente de evidencia temporal',status:'insufficient_evidence',confidence:'low',facts,evidence,hypotheses};
+   solution='Cruzar los datos del partido con secuencias temporales antes de convertir una observación en diagnóstico.';
+   task=null;
+ }
+ return {answer:diagnosis.title+'. '+solution,diagnosis,solution,training_task:task,evidence_to_check:plan.evidence_requirements,follow_up:'Usa las secuencias candidatas como punto de partida; los eventos de vídeo actuales no son hechos confirmados.',analysis_plan:{...plan,status:'completed',evidence_summary:{turnover_candidates:turnovers.length,transition_candidates:transitions.length,clips:clips.length}},facts,evidence,hypotheses,clip_refs:[...new Set(clips.map(x=>x.id).filter(Boolean))].slice(0,20)};
+}
+
+function localResponse(plan,c){return tacticalSynthesis(plan,c)}
+function compact(c){
+ const x={match:c.match||c.manual_data||null,problems:(c.problems||[]).slice(0,20),video:c.video||null,clips:(c.clips||[]).slice(0,40),evidence_ledger:(c.evidence_ledger||[]).slice(0,50),mission:c.mission||null};
+ return x;
+}
 async function llm(key,model,instructions,payload){
  const r=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:JSON.stringify({model,instructions,input:[{role:'user',content:JSON.stringify(payload)}],temperature:0.15})});
  const j=await r.json();if(!r.ok)throw new Error(j.error?.message||('OpenAI '+r.status));return j.output_text||'';
 }
 function parse(t){try{return JSON.parse(t)}catch(e){const m=String(t||'').match(/\{[\s\S]*\}/);if(m)try{return JSON.parse(m[0])}catch(_){}return null}}
+
 export const handler=async(event)=>{
  if(event.httpMethod==='OPTIONS')return{statusCode:204,headers:cors,body:''};
  if(event.httpMethod!=='POST')return json({error:'Método no permitido'},405);
  let b;try{b=JSON.parse(event.body||'{}')}catch(e){return json({error:'JSON inválido'},400)}
  const request=String(b.request||'').trim();if(!request)return json({error:'Falta la petición del entrenador'},400);
- const context=compact(b.context||{}),plan=makePlan(request,context),key=process.env.OPENAI_API_KEY;
- if(!key)return json({mode:'local',plan,response:localResponse(plan,context)});
- const instructions='Eres TacticAI, asistente táctico para entrenadores. Usa SOLO el contexto. Distingue HECHO, EVIDENCIA, HIPÓTESIS y RECOMENDACIÓN. Nunca inventes eventos, jugadores, métricas ni clips. Los eventos candidate no son hechos confirmados. Si falta evidencia, dilo. Devuelve JSON con plan, answer, diagnosis, solution, training_task, evidence_to_check, follow_up y analysis_plan.';
- try{const raw=await llm(key,process.env.TACTICAI_OPENAI_MODEL||'gpt-4.1-mini',instructions,{request,context,plan});const parsed=parse(raw);if(parsed)return json({mode:'llm',plan:parsed.plan||plan,response:parsed});return json({mode:'llm',plan,response:{answer:raw}})}catch(e){return json({mode:'local',plan,response:localResponse(plan,context),provider_error:e.message})}
+ const context=compact(b.context||{}),plan=makePlan(request,context),local=tacticalSynthesis(plan,context),key=process.env.OPENAI_API_KEY;
+ if(!key)return json({mode:'local',plan,response:local});
+ const instructions='Eres TacticAI, asistente táctico para entrenadores. Usa SOLO el contexto proporcionado. Distingue HECHO, EVIDENCIA, HIPÓTESIS y RECOMENDACIÓN. Nunca inventes eventos, jugadores, métricas ni clips. Los eventos candidate son candidatos, no hechos confirmados. Si la evidencia no permite confirmar una causa, dilo. Devuelve JSON válido con: answer, diagnosis{title,status,confidence,facts,evidence,hypotheses}, solution, training_task, evidence_to_check, follow_up, analysis_plan, facts, evidence, hypotheses, clip_refs. Cada clip_ref debe existir en el contexto. No conviertas geometría, proximidad o cambio de equipo en un pase, tiro, pérdida o acción técnica confirmada.';
+ try{
+   const raw=await llm(key,process.env.TACTICAI_OPENAI_MODEL||'gpt-4.1-mini',instructions,{request,context,plan,local_baseline:local});
+   const parsed=parse(raw);
+   if(parsed)return json({mode:'llm',plan:parsed.plan||plan,response:{...local,...parsed,plan:parsed.plan||plan}});
+   return json({mode:'llm',plan,response:{...local,answer:raw}});
+ }catch(e){return json({mode:'local',plan,response:{...local,provider_error:e.message}})}
 };
