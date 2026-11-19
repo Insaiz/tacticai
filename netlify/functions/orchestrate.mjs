@@ -18,6 +18,7 @@ function videoEvidence(c){
  return {
    possession_episodes:(s.possession_episodes||[]).slice(0,80),
    turnover_candidates:(s.turnover_candidates||[]).slice(0,80),
+   structural_context:(s.turnover_candidates||[]).map(x=>({timestamp:x.timestamp,clip_id:x.clip_id,context:x.structural_context})).filter(x=>x.context).slice(0,80),
    transition_candidates:(s.transition_candidates||[]).slice(0,80),
    defensive_transition_candidates:(s.defensive_transition_candidates||[]).slice(0,80),
    visual_facts:(s.visual_facts||[]).slice(0,80),
@@ -38,6 +39,21 @@ function tacticalSynthesis(plan,c){
    const top=Object.entries(byZone).sort((a,b)=>b[1]-a[1])[0];
    if(top)hypotheses.push({type:'hypothesis',label:'Concentración de cambios de posesión',value:top[0],count:top[1],confidence:'medium'});
    const geom=turnovers.map(t=>t.post_turnover_geometry).filter(Boolean);
+   const structural=turnovers.map(t=>t.structural_context).filter(Boolean);
+   if(structural.length){
+     const support=structural.map(x=>x.nearest_support_distance_px).filter(Number.isFinite);
+     const weak=structural.map(x=>x.weak_side_candidate).filter(Boolean);
+     const avg=a=>a.length?Math.round(a.reduce((s,x)=>s+x,0)/a.length):null;
+     evidence.push({type:'evidence',label:'Estructura espacial tras pérdida',value:{
+       samples:structural.length,
+       avg_nearest_support_distance_px:avg(support),
+       weak_side_candidates:[...new Set(weak)]
+     },source:'video.sequence.turnover_candidates.structural_context',clip_refs:turnovers.map(x=>x.clip_id).filter(Boolean).slice(0,10)});
+     if(support.length&&avg(support)>220)
+       hypotheses.push({type:'hypothesis',label:'Posible distancia excesiva de apoyo',value:'el jugador del equipo que pierde más cercano al balón aparece relativamente alejado en la ventana analizada',confidence:'medium'});
+     if(weak.length)
+       hypotheses.push({type:'hypothesis',label:'Posible lado débil expuesto',value:'la distribución espacial presenta una asimetría lateral candidata hacia '+[...new Set(weak)].join(', '),confidence:'low-medium'});
+   }
    if(geom.length){
      const nearOwn=geom.filter(g=>g.nearest_losing_team_px!=null).map(g=>g.nearest_losing_team_px);
      const nearOpp=geom.filter(g=>g.nearest_recovering_team_px!=null).map(g=>g.nearest_recovering_team_px);
@@ -52,10 +68,14 @@ function tacticalSynthesis(plan,c){
  let diagnosis=null,solution=null,task=null;
  if(turnovers.length && transitions.length){
    const late= hypotheses.some(h=>h.label==='Posible reacción defensiva tardía');
-   diagnosis={title:late?'Patrón candidato de pérdida + transición con posible reacción tardía':'Existe un patrón candidato de pérdida seguido de transición',status:'hypothesis',confidence:late?'medium':'medium',facts,evidence,hypotheses};
+   const supportGap= hypotheses.some(h=>h.label==='Posible distancia excesiva de apoyo');
+   const weakSide= hypotheses.some(h=>h.label==='Posible lado débil expuesto');
+   diagnosis={title:late?'Patrón candidato de pérdida + transición con posible reacción tardía':(supportGap||weakSide?'Patrón candidato de pérdida con posible problema estructural':'Existe un patrón candidato de pérdida seguido de transición'),status:'hypothesis',confidence:late?'medium':'medium',facts,evidence,hypotheses};
    solution=late
      ?'La evidencia espacial apunta a comprobar primero la reacción colectiva tras pérdida: quién salta al balón, quién protege dentro y qué distancia queda entre el jugador que pierde y el balón. No permite culpar a un lateral concreto.'
-     :'Prioriza verificar qué ocurre en los 3–5 segundos posteriores a las pérdidas: distancia al balón, ocupación de carriles, protección del espacio central y velocidad de reacción.';
+     :(supportGap||weakSide
+       ?'Prioriza comprobar la estructura colectiva: distancia del apoyo más cercano, protección del carril central y equilibrio del lado débil. La geometría es una hipótesis en espacio de cámara, no una posición táctica confirmada.'
+       :'Prioriza verificar qué ocurre en los 3–5 segundos posteriores a las pérdidas: distancia al balón, ocupación de carriles, protección del espacio central y velocidad de reacción.');
    task={title:'Pérdida + transición defensiva',objective:'mejorar la reacción tras pérdida',format:'oleada 5v4+comodines o juego de posición con transición inmediata',coaching_points:['reacción del jugador más cercano','cerrar línea de pase interior','proteger profundidad antes de saltar','reorganización del lado débil'],evidence_basis:'video.sequence.turnover_candidates + post_turnover_geometry'};
  } else if(turnovers.length){
    diagnosis={title:'Hay pérdidas candidatas detectadas, pero no basta para atribuir la causa',status:'hypothesis',confidence:'low-medium',facts,evidence,hypotheses};
