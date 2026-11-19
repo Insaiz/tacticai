@@ -34,17 +34,29 @@ function tacticalSynthesis(plan,c){
  if(Number.isFinite(Number(m.losses)))facts.push({type:'fact',label:'Pérdidas registradas',value:Number(m.losses),source:'manual_data'});
  if(turnovers.length){
    evidence.push({type:'evidence',label:'Cambios de posesión candidatos',value:turnovers.length,source:'video.sequence.turnover_candidates',clip_refs:turnovers.map(x=>x.clip_id||x.id).filter(Boolean).slice(0,10)});
-   const byZone={};for(const t of turnovers){const z=t.zone||'unknown';byZone[z]=(byZone[z]||0)+1;}
+   const byZone={};for(const t of turnovers){const z=t.to_zone||t.from_zone||'unknown';byZone[z]=(byZone[z]||0)+1;}
    const top=Object.entries(byZone).sort((a,b)=>b[1]-a[1])[0];
-   if(top)hypotheses.push({type:'hypothesis',label:'Concentración de pérdidas',value:top[0],count:top[1],confidence:'medium'});
+   if(top)hypotheses.push({type:'hypothesis',label:'Concentración de cambios de posesión',value:top[0],count:top[1],confidence:'medium'});
+   const geom=turnovers.map(t=>t.post_turnover_geometry).filter(Boolean);
+   if(geom.length){
+     const nearOwn=geom.filter(g=>g.nearest_losing_team_px!=null).map(g=>g.nearest_losing_team_px);
+     const nearOpp=geom.filter(g=>g.nearest_recovering_team_px!=null).map(g=>g.nearest_recovering_team_px);
+     const avg=a=>a.length?Math.round(a.reduce((s,x)=>s+x,0)/a.length):null;
+     evidence.push({type:'evidence',label:'Geometría tras cambio de posesión',value:{samples:geom.length,avg_losing_team_distance_px:avg(nearOwn),avg_recovering_team_distance_px:avg(nearOpp)},source:'video.sequence.turnover_candidates.post_turnover_geometry',clip_refs:turnovers.map(x=>x.clip_id).filter(Boolean).slice(0,10)});
+     if(nearOwn.length&&nearOpp.length&&avg(nearOwn)>avg(nearOpp)+35)
+       hypotheses.push({type:'hypothesis',label:'Posible reacción defensiva tardía',value:'el equipo que pierde queda más alejado del balón que el equipo que lo recupera en la ventana posterior',confidence:'medium'});
+   }
  }
  if(transitions.length)evidence.push({type:'evidence',label:'Transiciones candidatas',value:transitions.length,source:'video.sequence.transition_candidates',clip_refs:transitions.map(x=>x.clip_id||x.id).filter(Boolean).slice(0,10)});
  const askedRole=/lateral|extremo|mediocentro|central|delantero|jugador/.test(plan.request.toLowerCase());
  let diagnosis=null,solution=null,task=null;
  if(turnovers.length && transitions.length){
-   diagnosis={title:'Existe un patrón candidato de pérdida seguido de transición',status:'hypothesis',confidence:'medium',facts,evidence,hypotheses};
-   solution='Prioriza verificar qué ocurre en los 3–5 segundos posteriores a las pérdidas: distancia al balón, ocupación de carriles, protección del espacio central y velocidad de reacción.';
-   task={title:'Pérdida + transición defensiva',objective:'mejorar la reacción tras pérdida',format:'oleada 5v4+comodines o juego de posición con transición inmediata',coaching_points:['reacción del jugador más cercano','cerrar línea de pase interior','proteger profundidad antes de saltar','reorganización del lado débil'],evidence_basis:'video.sequence.turnover_candidates + transition_candidates'};
+   const late= hypotheses.some(h=>h.label==='Posible reacción defensiva tardía');
+   diagnosis={title:late?'Patrón candidato de pérdida + transición con posible reacción tardía':'Existe un patrón candidato de pérdida seguido de transición',status:'hypothesis',confidence:late?'medium':'medium',facts,evidence,hypotheses};
+   solution=late
+     ?'La evidencia espacial apunta a comprobar primero la reacción colectiva tras pérdida: quién salta al balón, quién protege dentro y qué distancia queda entre el jugador que pierde y el balón. No permite culpar a un lateral concreto.'
+     :'Prioriza verificar qué ocurre en los 3–5 segundos posteriores a las pérdidas: distancia al balón, ocupación de carriles, protección del espacio central y velocidad de reacción.';
+   task={title:'Pérdida + transición defensiva',objective:'mejorar la reacción tras pérdida',format:'oleada 5v4+comodines o juego de posición con transición inmediata',coaching_points:['reacción del jugador más cercano','cerrar línea de pase interior','proteger profundidad antes de saltar','reorganización del lado débil'],evidence_basis:'video.sequence.turnover_candidates + post_turnover_geometry'};
  } else if(turnovers.length){
    diagnosis={title:'Hay pérdidas candidatas detectadas, pero no basta para atribuir la causa',status:'hypothesis',confidence:'low-medium',facts,evidence,hypotheses};
    solution='Revisar las pérdidas por zona y la secuencia inmediatamente anterior y posterior antes de señalar a un jugador concreto.';
