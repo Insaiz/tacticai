@@ -145,7 +145,7 @@ async def upload(request:Request,file:UploadFile=File(...),project_id:str=Form('
 async def process(j,src,fps,team,opp):
     x=readj(j);x['status']='processing';x['progress']=5;writej(j,x)
     try:
-        result=build_analysis(str(src),fps,team,opp)
+        # build_analysis is CPU/blocking work. Keep it off FastAPI's event loop so\n        # /jobs/{id} can continue responding while the video is analyzed.\n        import asyncio\n        result=await asyncio.to_thread(build_analysis,str(src),fps,team,opp)
         x=readj(j);x['status']='completed';x['progress']=100;x['message']='Análisis completado';x['result']=result
         c=x.get('context',{});c['video']=result;c['clips']=result.get('clips',[]);c['evidence_ledger']=result.get('evidence_ledger',[]);x['context']=c
         writej(j,x)
