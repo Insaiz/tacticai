@@ -359,6 +359,29 @@ def build_analysis(path: str, sample_fps: float, team: str, opp: str):
                 "reason": "Se encadenan dos episodios de proximidad al balón de equipos distintos. Requiere validación temporal para confirmar una pérdida/recuperación real.",
             })
 
+    # Add a small, conservative post-turnover snapshot. This is spatial evidence,
+    # not a classification of the tactical action.
+    for ev in turnover_candidates:
+        t0=float(ev["timestamp"])
+        own=[]; opps=[]; ball_samples=[]
+        for cur in detections:
+            ts=float(cur["timestamp"])
+            if t0 <= ts <= t0+3.0 and cur.get("ball"):
+                players=[d for d in cur["detections"] if d["class_id"]==1]
+                b=cur["ball"]
+                own_d=[_distance(b,p) for p in players if p.get("team")==ev.get("from_team")]
+                opp_d=[_distance(b,p) for p in players if p.get("team")==ev.get("to_team")]
+                own.extend(own_d); opps.extend(opp_d); ball_samples.append(cur)
+        ev["post_turnover_geometry"]={
+            "window_seconds":3.0,
+            "samples":len(ball_samples),
+            "nearest_losing_team_px":round(min(own),1) if own else None,
+            "nearest_recovering_team_px":round(min(opps),1) if opps else None,
+            "losing_team_near_ball_180px":round(sum(d<=180 for d in own)/len(own),2) if own else None,
+            "recovering_team_near_ball_180px":round(sum(d<=180 for d in opps)/len(opps),2) if opps else None,
+            "evidence_level":"post_turnover_spatial_geometry",
+        }
+
     transition_candidates = []
     for ev in turnover_candidates:
         transition_candidates.append({
@@ -375,20 +398,24 @@ def build_analysis(path: str, sample_fps: float, team: str, opp: str):
     possession_candidates = possession_candidates[:1000]
     visual_facts = visual_facts[:1000]
 
-    clips = [{
-        "id": f"clip-{i+1}",
-        "title": e["type"],
-        "type": e["type"],
-        "timestamp": e["timestamp"],
-        "start": e["start"],
-        "end": e["end"],
-        "status": e["status"],
-        "confidence": e.get("confidence", 0),
-        "reason": e["reason"],
-        "source_video": True,
-        "playable": False,
-        "note": "Referencia temporal; el render físico del clip se genera en la siguiente capa.",
-    } for i, e in enumerate(events[:150])]
+    clips = []
+    for i, e in enumerate(events[:150]):
+        clip_id=f"clip-{i+1}"
+        e["clip_id"]=clip_id
+        clips.append({
+            "id": clip_id,
+            "title": e["type"],
+            "type": e["type"],
+            "timestamp": e["timestamp"],
+            "start": e["start"],
+            "end": e["end"],
+            "status": e["status"],
+            "confidence": e.get("confidence", 0),
+            "reason": e["reason"],
+            "source_video": True,
+            "playable": False,
+            "note": "Referencia temporal; el render físico del clip se genera en la siguiente capa.",
+        })
 
     return {
         "match": {"team": team, "opponent": opp},
