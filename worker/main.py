@@ -226,12 +226,27 @@ async def upload(request:Request,file:UploadFile=File(...),project_id:str=Form('
         raise HTTPException(500,msg)
 
 async def process(j,src,fps,team,opp):
+    def report_analysis_progress(percent, sampled, total):
+        try:
+            y=readj(j)
+            if y and y.get('status')=='processing':
+                y['progress']=round(min(90, max(5, percent)))
+                y['message']=f'Analizando vídeo · {sampled}/{total} muestras'
+                writej(j,y)
+        except Exception:
+            pass
+
     x=readj(j);x['status']='processing';x['progress']=5;writej(j,x)
     try:
         # build_analysis is CPU/blocking work. Keep it off FastAPI's event loop
         # /jobs/{id} can continue responding while the video is analyzed.
         import asyncio
-        result=await asyncio.to_thread(build_analysis,str(src),fps,team,opp)
+        result=await asyncio.to_thread(build_analysis,str(src),fps,team,opp,report_analysis_progress)
+        x=readj(j)
+        if x:
+            x['progress']=92
+            x['message']='Generando clips y overlay visual'
+            writej(j,x)
         rendered=render_evidence_clips(j,src,result,int(os.getenv('TACTICAI_MAX_RENDERED_CLIPS','20')))
         if rendered:
             result['clips']=rendered
