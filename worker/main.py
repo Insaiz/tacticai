@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os,json,uuid,shutil,subprocess,math
+import cv2
 from pathlib import Path
 from typing import Any,Dict
 from fastapi import FastAPI,UploadFile,File,Form,HTTPException,Request
