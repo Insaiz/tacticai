@@ -47,6 +47,8 @@ function tacticalSynthesis(plan,c){
      evidence.push({type:'evidence',label:'Estructura espacial tras pérdida',value:{
        samples:structural.length,
        avg_nearest_support_distance_px:avg(support),
+       avg_central_corridor_count:avg(structural.map(x=>x.central_corridor_count_avg).filter(Number.isFinite)),
+       avg_side_imbalance_count:avg(structural.map(x=>x.side_imbalance_count).filter(Number.isFinite)),
        weak_side_candidates:[...new Set(weak)]
      },source:'video.sequence.turnover_candidates.structural_context',clip_refs:turnovers.map(x=>x.clip_id).filter(Boolean).slice(0,10)});
      if(support.length&&avg(support)>220)
