@@ -25,6 +25,30 @@ def readj(j):
     return json.loads(p.read_text()) if p.exists() else None
 def writej(j,x): (job_dir(j)/'job.json').write_text(json.dumps(x,ensure_ascii=False,indent=2))
 
+def render_evidence_clips(j:str,src:Path,result:dict,max_clips:int=20):
+    clips_dir=job_dir(j)/'clips';clips_dir.mkdir(parents=True,exist_ok=True)
+    rendered=[]
+    for idx,clip in enumerate(result.get('clips',[])[:max_clips],1):
+        start=max(0.0,float(clip.get('start',0)))
+        end=max(start+0.5,float(clip.get('end',start+1)))
+        out=clips_dir/f"clip-{idx}.mp4"
+        duration=end-start
+        cmd=['ffmpeg','-y','-hide_banner','-loglevel','error','-ss',f'{start:.3f}','-i',str(src),
+             '-t',f'{duration:.3f}','-map','0:v:0?','-map','0:a:0?','-c:v','libx264','-preset','veryfast',
+             '-crf','23','-c:a','aac','-movflags','+faststart',str(out)]
+        try:
+            p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90)
+            if p.returncode!=0 or not out.exists() or out.stat().st_size<=0:
+                continue
+            x=dict(clip)
+            x['file']=f'clips/{out.name}'
+            x['download_url']=f'/jobs/{j}/artifacts/clips/{out.name}'
+            x['playable']=True
+            rendered.append(x)
+        except Exception:
+            continue
+    return rendered
+
 @app.get('/health')
 def health(): return {'ok':True,'service':'tacticai-worker','version':'1.8'}
 
@@ -149,6 +173,10 @@ async def process(j,src,fps,team,opp):
         # /jobs/{id} can continue responding while the video is analyzed.
         import asyncio
         result=await asyncio.to_thread(build_analysis,str(src),fps,team,opp)
+        rendered=render_evidence_clips(j,src,result,int(os.getenv('TACTICAI_MAX_RENDERED_CLIPS','20')))
+        if rendered:
+            result['clips']=rendered
+            result['evidence_ledger']=rendered
         x=readj(j);x['status']='completed';x['progress']=100;x['message']='Análisis completado';x['result']=result
         c=x.get('context',{});c['video']=result;c['clips']=result.get('clips',[]);c['evidence_ledger']=result.get('evidence_ledger',[]);x['context']=c
         writej(j,x)
