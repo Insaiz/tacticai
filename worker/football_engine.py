@@ -277,17 +277,98 @@ def build_analysis(path: str, sample_fps: float, team: str, opp: str):
                         {"nearby_player_count": len(nearby)}
                     ))
 
-    # A candidate transition window is stronger when the nearest player to the ball
-    # changes and the ball remains visible across consecutive samples.
-    for i in range(1, len(detections)):
-        a, b = detections[i - 1], detections[i]
-        if a["ball"] and b["ball"] and a["nearest_player"] and b["nearest_player"]:
-            if a["nearest_player"]["id"] != b["nearest_player"]["id"]:
-                events.append(_event(
-                    b["timestamp"], duration, "transition_candidate",
-                    "Cambio de jugador más cercano al balón entre dos muestras consecutivas; requiere validación temporal para determinar si existe pérdida/recuperación.",
-                    0.30, "temporal_ball_tracking"
-                ))
+    # Build conservative possession/turnover/transition episodes from consecutive
+    # ball-player proximity and heuristic team labels. These remain candidates:
+    # camera cuts, occlusion and jersey clustering can invalidate them.
+    episodes = []
+    active = None
+    min_distance = float(os.getenv("TACTICAI_POSSESSION_RADIUS_PX", "140"))
+    max_gap = float(os.getenv("TACTICAI_POSSESSION_GAP_SECONDS", "1.5"))
+
+    for cur in detections:
+        ts = cur["timestamp"]
+        nearest = cur["nearest_player"]
+        players = [d for d in cur["detections"] if d["class_id"] == 1]
+        if nearest:
+            p = next((x for x in players if x["id"] == nearest["id"]), None)
+            team = p.get("team", "unknown") if p else "unknown"
+            distance = float(nearest["distance_px"])
+            if distance <= min_distance:
+                if active is None:
+                    active = {
+                        "start": ts, "last": ts, "team": team,
+                        "player_track_id": nearest["id"],
+                        "samples": 1, "min_distance_px": distance,
+                        "start_zone": _zone(p["x"], p["y"], width, height) if p else None,
+                    }
+                elif ts - active["last"] <= max_gap and (
+                    active["player_track_id"] == nearest["id"] or active["team"] == team
+                ):
+                    active["last"] = ts
+                    active["samples"] += 1
+                    active["min_distance_px"] = min(active["min_distance_px"], distance)
+                else:
+                    episodes.append(active)
+                    active = {
+                        "start": ts, "last": ts, "team": team,
+                        "player_track_id": nearest["id"], "samples": 1,
+                        "min_distance_px": distance,
+                        "start_zone": _zone(p["x"], p["y"], width, height) if p else None,
+                    }
+            elif active is not None and ts - active["last"] > max_gap:
+                episodes.append(active); active = None
+        elif active is not None and ts - active["last"] > max_gap:
+            episodes.append(active); active = None
+
+    if active is not None:
+        episodes.append(active)
+
+    possession_episodes = []
+    for ep in episodes:
+        if ep["samples"] >= 2 and ep["last"] - ep["start"] >= 0.5:
+            possession_episodes.append({
+                "start": round(ep["start"], 3),
+                "end": round(ep["last"], 3),
+                "duration": round(ep["last"] - ep["start"], 3),
+                "team": ep["team"],
+                "player_track_id": ep["player_track_id"],
+                "zone": ep["start_zone"],
+                "min_distance_px": round(ep["min_distance_px"], 1),
+                "confidence": round(min(0.75, 0.35 + ep["samples"] * 0.04), 2),
+                "status": "candidate",
+                "evidence_level": "temporal_ball_player_proximity",
+                "reason": "Proximidad balón-jugador mantenida durante varias muestras; no constituye posesión confirmada.",
+            })
+
+    turnover_candidates = []
+    for a, b in zip(possession_episodes, possession_episodes[1:]):
+        gap = b["start"] - a["end"]
+        if 0 <= gap <= 3.0 and a["team"] != "unknown" and b["team"] != "unknown" and a["team"] != b["team"]:
+            turnover_candidates.append({
+                "timestamp": round(b["start"], 3),
+                "start": round(max(0, a["end"] - 1.0), 3),
+                "end": round(min(duration, b["start"] + 3.0), 3),
+                "type": "turnover_candidate",
+                "status": "candidate",
+                "confidence": round(min(a["confidence"], b["confidence"]) * 0.85, 2),
+                "evidence_level": "team_change_plus_ball_proximity",
+                "from_team": a["team"], "to_team": b["team"],
+                "from_player_track_id": a["player_track_id"],
+                "to_player_track_id": b["player_track_id"],
+                "from_zone": a["zone"], "to_zone": b["zone"],
+                "reason": "Se encadenan dos episodios de proximidad al balón de equipos distintos. Requiere validación temporal para confirmar una pérdida/recuperación real.",
+            })
+
+    transition_candidates = []
+    for ev in turnover_candidates:
+        transition_candidates.append({
+            **ev,
+            "type": "defensive_transition_candidate",
+            "reason": "Cambio de equipo asociado al balón; ventana posterior preparada para analizar la transición defensiva.",
+        })
+
+    events.extend(turnover_candidates)
+    events.extend(transition_candidates)
 
     events.sort(key=lambda x: x["timestamp"])
     events = events[:1000]
@@ -334,6 +415,9 @@ def build_analysis(path: str, sample_fps: float, team: str, opp: str):
             "windows": detections[:1000],
             "tracks": tracks_flat[:10000],
             "possession_candidates": possession_candidates,
+            "possession_episodes": possession_episodes,
+            "turnover_candidates": turnover_candidates,
+            "transition_candidates": transition_candidates,
             "visual_facts": visual_facts,
         },
     }
