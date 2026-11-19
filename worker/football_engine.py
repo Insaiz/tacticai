@@ -383,8 +383,11 @@ def build_analysis(path: str, sample_fps: float, team: str, opp: str):
         "start": e["start"],
         "end": e["end"],
         "status": e["status"],
+        "confidence": e.get("confidence", 0),
         "reason": e["reason"],
         "source_video": True,
+        "playable": False,
+        "note": "Referencia temporal; el render físico del clip se genera en la siguiente capa.",
     } for i, e in enumerate(events[:150])]
 
     return {
