@@ -127,76 +127,96 @@ def _event(ts: float, duration: float, typ: str, reason: str, confidence: float,
 
 
 def _structural_context(turnover: dict, detections: list[dict], width: int, height: int) -> dict:
-    """Estimate relative team structure around a candidate turnover."""
+    """Estimate relative team structure around a candidate turnover.
+
+    Outputs are camera/image-space evidence. They are not confirmed tactical roles.
+    """
     t0 = float(turnover.get("timestamp", 0.0))
     samples = []
     for cur in detections:
         ts = float(cur.get("timestamp", 0.0))
-        if t0 - 1.5 <= ts <= t0 + 2.5:
+        if t0 - 1.5 <= ts <= t0 + 2.5 and cur.get("ball"):
             players = [d for d in cur.get("detections", []) if d.get("class_id") == 1]
-            ball = cur.get("ball")
-            if ball:
-                samples.append((ts, players, ball))
+            samples.append((ts, players, cur["ball"]))
+
     if not samples:
         return {"evidence_level": "structural_geometry", "samples": 0}
 
     from_team = turnover.get("from_team")
-    to_team = turnover.get("to_team")
-    own_rows = []
+    losing_id = turnover.get("from_player_track_id")
+    own_by_sample = []
+    support_distances = []
+    central_counts = []
+    left_counts = []
+    right_counts = []
+    x_spreads = []
+    y_spreads = []
+
     for _, players, ball in samples:
         own = [p for p in players if p.get("team") == from_team]
+        if not own:
+            continue
         bx, by = float(ball["x"]), float(ball["y"])
-        for p in own:
-            own_rows.append({
-                "x": float(p["x"]), "y": float(p["y"]),
-                "dx": float(p["x"]) - bx, "dy": float(p["y"]) - by,
-                "distance": _distance(ball, p)
-            })
-    if not own_rows:
+        xs = [float(p["x"]) for p in own]
+        ys = [float(p["y"]) for p in own]
+        median_y = float(np.median(ys))
+        median_x = float(np.median(xs))
+
+        central_half = max(width * 0.12, 1.0)
+        left_counts.append(sum(float(p["y"]) < median_y - central_half for p in own))
+        right_counts.append(sum(float(p["y"]) > median_y + central_half for p in own))
+        central_counts.append(sum(abs(float(p["y"]) - median_y) <= central_half for p in own))
+        x_spreads.append(max(xs) - min(xs) if len(xs) > 1 else 0.0)
+        y_spreads.append(max(ys) - min(ys) if len(ys) > 1 else 0.0)
+
+        support = [
+            _distance(ball, p) for p in own
+            if p.get("id") != losing_id
+        ]
+        if support:
+            support_distances.append(min(support))
+
+        own_by_sample.append({
+            "median_x": median_x,
+            "median_y": median_y,
+            "ball_x": bx,
+            "ball_y": by,
+            "player_count": len(own),
+        })
+
+    if not own_by_sample:
         return {
             "evidence_level": "structural_geometry",
             "samples": len(samples),
             "status": "insufficient_team_geometry",
         }
 
-    xs = [r["x"] for r in own_rows]
-    ys = [r["y"] for r in own_rows]
-    median_x = float(np.median(xs))
-    median_y = float(np.median(ys))
-    central_half = max(width * 0.12, 1.0)
-    wide_band = max(width * 0.28, 1.0)
-    central = [r for r in own_rows if abs(r["y"] - median_y) <= central_half]
-    wide_left = [r for r in own_rows if r["y"] < median_y - wide_band]
-    wide_right = [r for r in own_rows if r["y"] > median_y + wide_band]
-    nearest = min(own_rows, key=lambda r: r["distance"])
-    ahead = [r for r in own_rows if r["x"] < median_x - width * 0.10]
-    behind = [r for r in own_rows if r["x"] > median_x + width * 0.10]
+    avg = lambda xs: round(float(np.mean(xs)), 2) if xs else None
+    avg_left = avg(left_counts)
+    avg_right = avg(right_counts)
+    side_imbalance = round(abs((avg_left or 0) - (avg_right or 0)), 2)
 
-    left_dist = min([abs(r["y"] - median_y) for r in own_rows if r["y"] < median_y] or [0.0])
-    right_dist = min([abs(r["y"] - median_y) for r in own_rows if r["y"] > median_y] or [0.0])
     weak_side = None
-    if left_dist > right_dist * 1.35 and left_dist > 1:
-        weak_side = "left"
-    elif right_dist > left_dist * 1.35 and right_dist > 1:
-        weak_side = "right"
+    if avg_left is not None and avg_right is not None and side_imbalance >= 1.5:
+        weak_side = "left" if avg_left < avg_right else "right"
 
     return {
         "evidence_level": "structural_geometry",
         "status": "candidate",
-        "samples": len(samples),
+        "samples": len(own_by_sample),
         "camera_space": True,
         "coordinate_note": "x/y son coordenadas de imagen; sin calibración no representan metros ni posiciones tácticas confirmadas.",
-        "team_player_samples": len(own_rows),
-        "median_team_x_px": round(median_x, 1),
-        "median_team_y_px": round(median_y, 1),
-        "central_corridor_count_avg": round(len(central) / max(1, len(samples)), 2),
-        "wide_left_count_avg": round(len(wide_left) / max(1, len(samples)), 2),
-        "wide_right_count_avg": round(len(wide_right) / max(1, len(samples)), 2),
-        "nearest_support_distance_px": round(nearest["distance"], 1),
-        "players_ahead_of_team_median_avg": round(len(ahead) / max(1, len(samples)), 2),
-        "players_behind_team_median_avg": round(len(behind) / max(1, len(samples)), 2),
+        "team_player_samples_avg": avg([x["player_count"] for x in own_by_sample]),
+        "nearest_support_distance_px": round(float(np.mean(support_distances)), 1) if support_distances else None,
+        "central_corridor_count_avg": avg(central_counts),
+        "left_width_count_avg": avg_left,
+        "right_width_count_avg": avg_right,
+        "side_imbalance_count": side_imbalance,
         "weak_side_candidate": weak_side,
-        "weak_side_asymmetry_px": round(abs(left_dist - right_dist), 1),
+        "team_depth_spread_px_avg": avg(x_spreads),
+        "team_width_spread_px_avg": avg(y_spreads),
+        "ball_relative_team_x_px_avg": avg([x["ball_x"] - x["median_x"] for x in own_by_sample]),
+        "ball_relative_team_y_px_avg": avg([x["ball_y"] - x["median_y"] for x in own_by_sample]),
     }
 
 
