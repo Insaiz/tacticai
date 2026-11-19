@@ -125,6 +125,81 @@ def _event(ts: float, duration: float, typ: str, reason: str, confidence: float,
     return e
 
 
+
+def _structural_context(turnover: dict, detections: list[dict], width: int, height: int) -> dict:
+    """Estimate relative team structure around a candidate turnover."""
+    t0 = float(turnover.get("timestamp", 0.0))
+    samples = []
+    for cur in detections:
+        ts = float(cur.get("timestamp", 0.0))
+        if t0 - 1.5 <= ts <= t0 + 2.5:
+            players = [d for d in cur.get("detections", []) if d.get("class_id") == 1]
+            ball = cur.get("ball")
+            if ball:
+                samples.append((ts, players, ball))
+    if not samples:
+        return {"evidence_level": "structural_geometry", "samples": 0}
+
+    from_team = turnover.get("from_team")
+    to_team = turnover.get("to_team")
+    own_rows = []
+    for _, players, ball in samples:
+        own = [p for p in players if p.get("team") == from_team]
+        bx, by = float(ball["x"]), float(ball["y"])
+        for p in own:
+            own_rows.append({
+                "x": float(p["x"]), "y": float(p["y"]),
+                "dx": float(p["x"]) - bx, "dy": float(p["y"]) - by,
+                "distance": _distance(ball, p)
+            })
+    if not own_rows:
+        return {
+            "evidence_level": "structural_geometry",
+            "samples": len(samples),
+            "status": "insufficient_team_geometry",
+        }
+
+    xs = [r["x"] for r in own_rows]
+    ys = [r["y"] for r in own_rows]
+    median_x = float(np.median(xs))
+    median_y = float(np.median(ys))
+    central_half = max(width * 0.12, 1.0)
+    wide_band = max(width * 0.28, 1.0)
+    central = [r for r in own_rows if abs(r["y"] - median_y) <= central_half]
+    wide_left = [r for r in own_rows if r["y"] < median_y - wide_band]
+    wide_right = [r for r in own_rows if r["y"] > median_y + wide_band]
+    nearest = min(own_rows, key=lambda r: r["distance"])
+    ahead = [r for r in own_rows if r["x"] < median_x - width * 0.10]
+    behind = [r for r in own_rows if r["x"] > median_x + width * 0.10]
+
+    left_dist = min([abs(r["y"] - median_y) for r in own_rows if r["y"] < median_y] or [0.0])
+    right_dist = min([abs(r["y"] - median_y) for r in own_rows if r["y"] > median_y] or [0.0])
+    weak_side = None
+    if left_dist > right_dist * 1.35 and left_dist > 1:
+        weak_side = "left"
+    elif right_dist > left_dist * 1.35 and right_dist > 1:
+        weak_side = "right"
+
+    return {
+        "evidence_level": "structural_geometry",
+        "status": "candidate",
+        "samples": len(samples),
+        "camera_space": True,
+        "coordinate_note": "x/y son coordenadas de imagen; sin calibración no representan metros ni posiciones tácticas confirmadas.",
+        "team_player_samples": len(own_rows),
+        "median_team_x_px": round(median_x, 1),
+        "median_team_y_px": round(median_y, 1),
+        "central_corridor_count_avg": round(len(central) / max(1, len(samples)), 2),
+        "wide_left_count_avg": round(len(wide_left) / max(1, len(samples)), 2),
+        "wide_right_count_avg": round(len(wide_right) / max(1, len(samples)), 2),
+        "nearest_support_distance_px": round(nearest["distance"], 1),
+        "players_ahead_of_team_median_avg": round(len(ahead) / max(1, len(samples)), 2),
+        "players_behind_team_median_avg": round(len(behind) / max(1, len(samples)), 2),
+        "weak_side_candidate": weak_side,
+        "weak_side_asymmetry_px": round(abs(left_dist - right_dist), 1),
+    }
+
+
 def build_analysis(path: str, sample_fps: float, team: str, opp: str):
     cap = cv2.VideoCapture(path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
@@ -381,6 +456,9 @@ def build_analysis(path: str, sample_fps: float, team: str, opp: str):
             "recovering_team_near_ball_180px":round(sum(d<=180 for d in opps)/len(opps),2) if opps else None,
             "evidence_level":"post_turnover_spatial_geometry",
         }
+
+    for ev in turnover_candidates:
+        ev["structural_context"] = _structural_context(ev, detections, width, height)
 
     transition_candidates = []
     for ev in turnover_candidates:
