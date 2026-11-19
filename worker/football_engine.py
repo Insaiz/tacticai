@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 import cv2
+import numpy as np
 
 from detector import FootballDetector
 
@@ -15,6 +16,52 @@ CLASS_NAMES = {0: "ball", 1: "player", 2: "referee"}
 def _distance(a: dict, b: dict) -> float:
     return math.hypot(float(a["x"]) - float(b["x"]), float(a["y"]) - float(b["y"]))
 
+
+def _team_color(frame, det: dict):
+    x, y, w, h = det["x"], det["y"], det["w"], det["h"]
+    x1 = max(0, int(x - w * 0.32)); x2 = min(frame.shape[1], int(x + w * 0.32))
+    y1 = max(0, int(y - h * 0.42)); y2 = min(frame.shape[0], int(y - h * 0.02))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    mask = (hsv[:, :, 1] > 55) & (hsv[:, :, 2] > 45) & (hsv[:, :, 2] < 245)
+    if int(mask.sum()) < 20:
+        return None
+    pixels = hsv[mask]
+    ang = pixels[:, 0].astype(float) * math.pi / 90.0
+    hue = math.atan2(float(np.sin(ang).mean()), float(np.cos(ang).mean())) * 90.0 / math.pi
+    if hue < 0:
+        hue += 180.0
+    return [hue / 180.0, float(pixels[:, 1].mean()) / 255.0, float(pixels[:, 2].mean()) / 255.0]
+
+def _assign_teams(players: list[dict], frame) -> list[dict]:
+    vectors, valid = [], []
+    for p in players:
+        v = _team_color(frame, p)
+        if v is not None:
+            vectors.append(v); valid.append(p)
+    if len(vectors) < 2:
+        return [{**p, "team": "unknown"} for p in players]
+    best_i, best_j, best_d = 0, 1, -1.0
+    for i in range(len(vectors)):
+        for j in range(i + 1, len(vectors)):
+            d = float(np.linalg.norm(np.asarray(vectors[i]) - np.asarray(vectors[j])))
+            if d > best_d:
+                best_i, best_j, best_d = i, j, d
+    a, b = np.asarray(vectors[best_i]), np.asarray(vectors[best_j])
+    labels = [0] * len(vectors)
+    for _ in range(5):
+        labels = [0 if np.linalg.norm(np.asarray(v)-a) <= np.linalg.norm(np.asarray(v)-b) else 1 for v in vectors]
+        for k in (0, 1):
+            pts = [np.asarray(vectors[i]) for i, lab in enumerate(labels) if lab == k]
+            if pts:
+                if k == 0: a = np.mean(pts, axis=0)
+                else: b = np.mean(pts, axis=0)
+    by_id = {p["id"]: ("team_a" if labels[i] == 0 else "team_b") for i, p in enumerate(valid)}
+    return [{**p, "team": by_id.get(p["id"], "unknown")} for p in players]
 
 def _zone(x: float, y: float, width: int, height: int) -> str:
     nx = max(0.0, min(0.999, x / max(width, 1)))
@@ -107,6 +154,12 @@ def build_analysis(path: str, sample_fps: float, team: str, opp: str):
         prev_tracks = current
 
         players = [d for d in current if d["class_id"] == 1]
+        players = _assign_teams(players, frame)
+        for p in players:
+            for d in current:
+                if d["id"] == p["id"]:
+                    d["team"] = p.get("team", "unknown")
+                    break
         balls = [d for d in current if d["class_id"] == 0]
         referees = [d for d in current if d["class_id"] == 2]
         ball = max(balls, key=lambda x: x["confidence"], default=None)
@@ -137,6 +190,7 @@ def build_analysis(path: str, sample_fps: float, team: str, opp: str):
                 "y_px": round(d["y"], 1),
                 "movement_px": d["movement_px"],
                 "zone": _zone(d["x"], d["y"], width, height),
+                "team": d.get("team", "unknown"),
             })
 
         sampled += 1
@@ -173,6 +227,7 @@ def build_analysis(path: str, sample_fps: float, team: str, opp: str):
                 "player_track_id": owner,
                 "distance_px": cur["nearest_player"]["distance_px"],
                 "zone": _zone(p["x"], p["y"], width, height) if p else None,
+                "team": p.get("team", "unknown") if p else "unknown",
                 "status": "candidate",
                 "evidence_level": "ball_player_proximity",
                 "reason": "El balón está próximo al jugador más cercano; no implica posesión confirmada ni equipo identificado.",
@@ -268,8 +323,9 @@ def build_analysis(path: str, sample_fps: float, team: str, opp: str):
             "video_decoded": True,
             "football_detector_loaded": detector.available,
             "tracking": True,
+            "team_assignment": True,
             "football_events_confirmed": False,
-            "notes": "Las posesiones, pérdidas, recuperaciones y acciones tácticas siguen siendo candidatas hasta incorporar validación temporal, identidad de equipo y calibración del campo.",
+            "notes": "La asignación de equipos es una heurística visual basada en color de camiseta y debe validarse; posesiones, pérdidas y acciones tácticas siguen siendo candidatas hasta incorporar validación temporal e identidad persistente.",
         },
         "events": events,
         "clips": clips,
