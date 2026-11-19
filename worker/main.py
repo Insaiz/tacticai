@@ -28,25 +28,83 @@ def writej(j,x): (job_dir(j)/'job.json').write_text(json.dumps(x,ensure_ascii=Fa
 def render_evidence_clips(j:str,src:Path,result:dict,max_clips:int=20):
     clips_dir=job_dir(j)/'clips';clips_dir.mkdir(parents=True,exist_ok=True)
     rendered=[]
+    windows=result.get('sequence',{}).get('windows',[])
+    by_ts=sorted(windows,key=lambda x:float(x.get('timestamp',0)))
+    overlay=os.getenv('TACTICAI_RENDER_OVERLAY','1')!='0'
+
+    def nearest_window(ts):
+        if not by_ts:return None
+        return min(by_ts,key=lambda x:abs(float(x.get('timestamp',0))-ts))
+
     for idx,clip in enumerate(result.get('clips',[])[:max_clips],1):
         start=max(0.0,float(clip.get('start',0)))
         end=max(start+0.5,float(clip.get('end',start+1)))
         out=clips_dir/f"clip-{idx}.mp4"
         duration=end-start
-        cmd=['ffmpeg','-y','-hide_banner','-loglevel','error','-ss',f'{start:.3f}','-i',str(src),
-             '-t',f'{duration:.3f}','-map','0:v:0?','-map','0:a:0?','-c:v','libx264','-preset','veryfast',
-             '-crf','23','-c:a','aac','-movflags','+faststart',str(out)]
-        try:
-            p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90)
-            if p.returncode!=0 or not out.exists() or out.stat().st_size<=0:
-                continue
+        ok=False
+        if overlay:
+            cap=cv2.VideoCapture(str(src))
+            fps=cap.get(cv2.CAP_PROP_FPS) or 25.0
+            w=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            h=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            if w>0 and h>0:
+                tmp=clips_dir/f".overlay-{idx}.mp4"
+                writer=cv2.VideoWriter(str(tmp),cv2.VideoWriter_fourcc(*'mp4v'),fps,(w,h))
+                cap.set(cv2.CAP_PROP_POS_MSEC,start*1000)
+                frames=int(max(1,duration*fps))
+                for _ in range(frames):
+                    ret,frame=cap.read()
+                    if not ret:break
+                    ts=cap.get(cv2.CAP_PROP_POS_MSEC)/1000.0
+                    win=nearest_window(ts)
+                    if win:
+                        for p in win.get('detections',[]):
+                            x,y,ww,hh=[int(float(p.get(k,0))) for k in ('x','y','w','h')]
+                            cls=p.get('class_id')
+                            if cls==1:
+                                team=p.get('team','unknown')
+                                if team=='team_a': c=(40,180,255)
+                                elif team=='team_b': c=(255,160,40)
+                                else: c=(180,180,180)
+                                cv2.rectangle(frame,(x-ww//2,y-hh//2),(x+ww//2,y+hh//2),c,2)
+                                cv2.putText(frame,f"P{p.get('id','?')} {team}",(x-ww//2,max(15,y-hh//2-4)),cv2.FONT_HERSHEY_SIMPLEX,0.42,c,1,cv2.LINE_AA)
+                            elif cls==0:
+                                cv2.circle(frame,(x,y),max(5,int(min(w,h)*0.009)),(255,255,255),-1)
+                                cv2.circle(frame,(x,y),max(7,int(min(w,h)*0.012)),(30,30,30),2)
+                        evs=[e for e in result.get('events',[]) if e.get('clip_id')==clip.get('id')]
+                        ev=evs[0] if evs else None
+                        sc=ev.get('structural_context',{}) if ev else {}
+                        cv2.rectangle(frame,(10,10),(min(w-10,620),130), (20,20,20), -1)
+                        cv2.putText(frame,f"TacticAI · {clip.get('type','candidate')}",(24,36),cv2.FONT_HERSHEY_SIMPLEX,0.62,(255,255,255),2,cv2.LINE_AA)
+                        cv2.putText(frame,f"t={ts:.1f}s  status={clip.get('status','candidate')}",(24,62),cv2.FONT_HERSHEY_SIMPLEX,0.48,(220,220,220),1,cv2.LINE_AA)
+                        if sc:
+                            txt=f"support={sc.get('nearest_support_distance_px','—')}px  central={sc.get('central_corridor_count_avg','—')}"
+                            cv2.putText(frame,txt,(24,88),cv2.FONT_HERSHEY_SIMPLEX,0.45,(220,220,220),1,cv2.LINE_AA)
+                            cv2.putText(frame,f"weak_side={sc.get('weak_side_candidate') or 'none'}  camera-space",(24,112),cv2.FONT_HERSHEY_SIMPLEX,0.45,(220,220,220),1,cv2.LINE_AA)
+                    writer.write(frame)
+                writer.release();cap.release()
+                if tmp.exists() and tmp.stat().st_size>0:
+                    ff=['ffmpeg','-y','-hide_banner','-loglevel','error','-i',str(tmp),'-c:v','libx264','-preset','veryfast','-crf','23','-movflags','+faststart',str(out)]
+                    p=subprocess.run(ff,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=120)
+                    try:tmp.unlink()
+                    except Exception:pass
+                    ok=p.returncode==0 and out.exists() and out.stat().st_size>0
+        if not ok:
+            cmd=['ffmpeg','-y','-hide_banner','-loglevel','error','-ss',f'{start:.3f}','-i',str(src),
+                 '-t',f'{duration:.3f}','-map','0:v:0?','-map','0:a:0?','-c:v','libx264','-preset','veryfast',
+                 '-crf','23','-c:a','aac','-movflags','+faststart',str(out)]
+            try:
+                p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90)
+                ok=p.returncode==0 and out.exists() and out.stat().st_size>0
+            except Exception:
+                ok=False
+        if ok:
             x=dict(clip)
             x['file']=f'clips/{out.name}'
             x['download_url']=f'/jobs/{j}/artifacts/clips/{out.name}'
             x['playable']=True
+            x['visualization']='TacticAI overlay' if overlay else 'raw clip'
             rendered.append(x)
-        except Exception:
-            continue
     return rendered
 
 @app.get('/health')
