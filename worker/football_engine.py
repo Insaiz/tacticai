@@ -220,7 +220,7 @@ def _structural_context(turnover: dict, detections: list[dict], width: int, heig
     }
 
 
-def build_analysis(path: str, sample_fps: float, team: str, opp: str):
+def build_analysis(path: str, sample_fps: float, team: str, opp: str, progress_cb=None):
     cap = cv2.VideoCapture(path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -237,11 +237,19 @@ def build_analysis(path: str, sample_fps: float, team: str, opp: str):
     width = height = 0
     frame_index = 0
 
-    while frame_index < total_frames and frame_index / fps <= max_seconds:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+    max_frame = min(total_frames, int(max_seconds * fps)) if total_frames else 0
+    estimated_samples = max(1, int(math.ceil(max_frame / step))) if max_frame else 1
+
+    # Decode sequentially and only run the detector on sampled frames.
+    # Random cap.set() seeks are extremely expensive on long videos/codecs.
+    while frame_index < max_frame:
         ok, frame = cap.read()
         if not ok:
             break
+
+        if frame_index % step != 0:
+            frame_index += 1
+            continue
 
         height, width = frame.shape[:2]
         raw = detector.detect(frame) if detector.available else []
@@ -289,7 +297,12 @@ def build_analysis(path: str, sample_fps: float, team: str, opp: str):
             })
 
         sampled += 1
-        frame_index += step
+        if progress_cb and (sampled == 1 or sampled % 10 == 0 or sampled == estimated_samples):
+            try:
+                progress_cb(5 + 85 * (sampled / estimated_samples), sampled, estimated_samples)
+            except Exception:
+                pass
+        frame_index += 1
 
     cap.release()
 
