@@ -26,7 +26,7 @@ def readj(j):
     return json.loads(p.read_text()) if p.exists() else None
 def writej(j,x): (job_dir(j)/'job.json').write_text(json.dumps(x,ensure_ascii=False,indent=2))
 
-def render_evidence_clips(j:str,src:Path,result:dict,max_clips:int=20):
+def render_evidence_clips(j:str,src:Path,result:dict,max_clips:int=6):
     clips_dir=job_dir(j)/'clips';clips_dir.mkdir(parents=True,exist_ok=True)
     rendered=[]
     windows=result.get('sequence',{}).get('windows',[])
@@ -37,11 +37,21 @@ def render_evidence_clips(j:str,src:Path,result:dict,max_clips:int=20):
         if not by_ts:return None
         return min(by_ts,key=lambda x:abs(float(x.get('timestamp',0))-ts))
 
-    for idx,clip in enumerate(result.get('clips',[])[:max_clips],1):
+    clips_to_render=result.get('clips',[])[:max_clips]
+    total_render=len(clips_to_render)
+    for idx,clip in enumerate(clips_to_render,1):
+        try:
+            x=readj(j) or {}
+            x['progress']=92+round(7*idx/max(1,total_render))
+            x['message']=f'Generando clip {idx}/{total_render}'
+            writej(j,x)
+        except Exception:
+            pass
+        print(f'TacticAI render: clip {idx}/{total_render}',flush=True)
         start=max(0.0,float(clip.get('start',0)))
         end=max(start+0.5,float(clip.get('end',start+1)))
         out=clips_dir/f"clip-{idx}.mp4"
-        duration=end-start
+        duration=min(end-start,8.0)
         ok=False
         if overlay:
             cap=cv2.VideoCapture(str(src))
@@ -84,18 +94,20 @@ def render_evidence_clips(j:str,src:Path,result:dict,max_clips:int=20):
                             cv2.putText(frame,f"weak_side={sc.get('weak_side_candidate') or 'none'}  camera-space",(24,112),cv2.FONT_HERSHEY_SIMPLEX,0.45,(220,220,220),1,cv2.LINE_AA)
                     writer.write(frame)
                 writer.release();cap.release()
+                print(f'TacticAI render: overlay frames finished for clip {idx}/{total_render}',flush=True)
                 if tmp.exists() and tmp.stat().st_size>0:
                     ff=['ffmpeg','-y','-hide_banner','-loglevel','error','-i',str(tmp),'-c:v','libx264','-preset','veryfast','-crf','23','-movflags','+faststart',str(out)]
-                    p=subprocess.run(ff,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=120)
+                    p=subprocess.run(ff,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60)
                     try:tmp.unlink()
                     except Exception:pass
                     ok=p.returncode==0 and out.exists() and out.stat().st_size>0
+                print(f'TacticAI render: ffmpeg clip {idx}/{total_render} rc={p.returncode}',flush=True)
         if not ok:
             cmd=['ffmpeg','-y','-hide_banner','-loglevel','error','-ss',f'{start:.3f}','-i',str(src),
                  '-t',f'{duration:.3f}','-map','0:v:0?','-map','0:a:0?','-c:v','libx264','-preset','veryfast',
                  '-crf','23','-c:a','aac','-movflags','+faststart',str(out)]
             try:
-                p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90)
+                p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60)
                 ok=p.returncode==0 and out.exists() and out.stat().st_size>0
             except Exception:
                 ok=False
@@ -106,6 +118,7 @@ def render_evidence_clips(j:str,src:Path,result:dict,max_clips:int=20):
             x['playable']=True
             x['visualization']='TacticAI overlay' if overlay else 'raw clip'
             rendered.append(x)
+    print(f'TacticAI render: completed {len(rendered)}/{total_render} clips',flush=True)
     return rendered
 
 @app.get('/health')
@@ -247,7 +260,7 @@ async def process(j,src,fps,team,opp):
             x['progress']=92
             x['message']='Generando clips y overlay visual'
             writej(j,x)
-        rendered=render_evidence_clips(j,src,result,int(os.getenv('TACTICAI_MAX_RENDERED_CLIPS','20')))
+        rendered=render_evidence_clips(j,src,result,int(os.getenv('TACTICAI_MAX_RENDERED_CLIPS','6')))
         if rendered:
             result['clips']=rendered
             result['evidence_ledger']=rendered
