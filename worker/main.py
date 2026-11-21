@@ -26,12 +26,12 @@ def readj(j):
     return json.loads(p.read_text()) if p.exists() else None
 def writej(j,x): (job_dir(j)/'job.json').write_text(json.dumps(x,ensure_ascii=False,indent=2))
 
-def render_evidence_clips(j:str,src:Path,result:dict,max_clips:int=6):
+def render_evidence_clips(j:str,src:Path,result:dict,max_clips:int=3):
     clips_dir=job_dir(j)/'clips';clips_dir.mkdir(parents=True,exist_ok=True)
     rendered=[]
     windows=result.get('sequence',{}).get('windows',[])
     by_ts=sorted(windows,key=lambda x:float(x.get('timestamp',0)))
-    overlay=os.getenv('TACTICAI_RENDER_OVERLAY','1')!='0'
+    overlay=os.getenv('TACTICAI_RENDER_OVERLAY','0')!='0'
 
     def nearest_window(ts):
         if not by_ts:return None
@@ -260,7 +260,7 @@ async def process(j,src,fps,team,opp):
             x['progress']=92
             x['message']='Generando clips y overlay visual'
             writej(j,x)
-        rendered=render_evidence_clips(j,src,result,int(os.getenv('TACTICAI_MAX_RENDERED_CLIPS','6')))
+        rendered=render_evidence_clips(j,src,result,int(os.getenv('TACTICAI_MAX_RENDERED_CLIPS','3')))
         if rendered:
             result['clips']=rendered
             result['evidence_ledger']=rendered
