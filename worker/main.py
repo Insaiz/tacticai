@@ -260,10 +260,16 @@ async def process(j,src,fps,team,opp):
             x['progress']=92
             x['message']='Generando clips y overlay visual'
             writej(j,x)
-        rendered=render_evidence_clips(j,src,result,int(os.getenv('TACTICAI_MAX_RENDERED_CLIPS','3')))
-        if rendered:
-            result['clips']=rendered
-            result['evidence_ledger']=rendered
+        # Do not block completion on video rendering. The tactical analysis is the
+        # primary artifact; clips can be rendered separately/on demand.
+        x=readj(j)
+        if x:
+            x['progress']=98
+            x['message']='Análisis táctico listo; finalizando resultados'
+            writej(j,x)
+        for clip in result.get('clips',[]):
+            clip.setdefault('playable',False)
+            clip.setdefault('visualization','pending_render')
         x=readj(j);x['status']='completed';x['progress']=100;x['message']='Análisis completado';x['result']=result
         c=x.get('context',{});c['video']=result;c['clips']=result.get('clips',[]);c['evidence_ledger']=result.get('evidence_ledger',[]);x['context']=c
         writej(j,x)
