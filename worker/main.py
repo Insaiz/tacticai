@@ -8,11 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from football_engine import build_analysis
 
 BASE=Path(os.getenv('TACTICAI_DATA','/data'));BASE.mkdir(parents=True,exist_ok=True)
-# Keep the small Railway volume for project metadata/artifacts, not raw video files.
-# Remove stale source videos left by previous failed uploads so the worker can recover from a full volume.
-for _p in BASE.glob('*/source*'):
-    try: _p.unlink()
-    except Exception: pass
+# Persist source video per job so evidence clips can be rendered after analysis.
+# Completed jobs keep their source until the project is archived/deleted.
 import tempfile
 TOKEN=os.getenv('TACTICAI_WORKER_TOKEN','')
 app=FastAPI(title='TacticAI Worker',version='1.8')
@@ -25,6 +22,12 @@ def readj(j):
     p=job_dir(j)/'job.json'
     return json.loads(p.read_text()) if p.exists() else None
 def writej(j,x): (job_dir(j)/'job.json').write_text(json.dumps(x,ensure_ascii=False,indent=2))
+def persisted_source(j):
+    x=readj(j) or {}
+    name=Path(str(x.get('source',''))).name
+    if not name:return None
+    p=job_dir(j)/name
+    return p if p.exists() else None
 
 def render_evidence_clips(j:str,src:Path,result:dict,max_clips:int=3):
     clips_dir=job_dir(j)/'clips';clips_dir.mkdir(parents=True,exist_ok=True)
@@ -273,6 +276,13 @@ async def process(j,src,fps,team,opp):
         x=readj(j);x['status']='completed';x['progress']=100;x['message']='Análisis completado';x['result']=result
         c=x.get('context',{});c['video']=result;c['clips']=result.get('clips',[]);c['evidence_ledger']=result.get('evidence_ledger',[]);x['context']=c
         writej(j,x)
+        if os.getenv('TACTICAI_PERSIST_SOURCE','1')!='0':
+            persisted=job_dir(j)/src.name
+            shutil.copy2(src,persisted)
+            x=readj(j) or {}
+            x['source']=persisted.name
+            x['source_persisted']=True
+            writej(j,x)
         try: src.unlink()
         except Exception: pass
         (job_dir(j)/'result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2))
@@ -298,6 +308,43 @@ def clips(j:str,request:Request):
     if not x: raise HTTPException(404,'Job not found')
     return {'clips':x.get('context',{}).get('clips',[])}
 
+@app.post('/jobs/{j}/render')
+async def render_job(j:str,request:Request):
+    auth(request)
+    x=readj(j)
+    if not x: raise HTTPException(404,'Job not found')
+    src=persisted_source(j)
+    if not src: raise HTTPException(404,'Source video unavailable for rendering')
+    result=x.get('result',{})
+    if not result.get('clips'): return {'clips':[],'message':'No evidence clips available'}
+    import asyncio
+    x['status']='rendering';x['progress']=92;x['message']='Preparando clips de evidencia';writej(j,x)
+    try:
+        rendered=await asyncio.to_thread(render_evidence_clips,j,src,result,int(os.getenv('TACTICAI_MAX_RENDER_CLIPS','3')))
+        by_id={str(c.get('id')):c for c in rendered if c.get('id') is not None}
+        merged=[]
+        for clip in result.get('clips',[]):
+            rc=by_id.get(str(clip.get('id')))
+            merged.append(rc if rc else clip)
+        result['clips']=merged
+        x=readj(j) or x
+        x['result']=result
+        ctx=x.get('context',{})
+        ctx['video']=result
+        ctx['clips']=merged
+        ctx['evidence_ledger']=result.get('evidence_ledger',ctx.get('evidence_ledger',[]))
+        x['context']=ctx
+        x['status']='completed';x['progress']=100;x['message']='Clips de evidencia listos'
+        writej(j,x)
+        (job_dir(j)/'result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2))
+        (job_dir(j)/'project_context.json').write_text(json.dumps(ctx,ensure_ascii=False,indent=2))
+        return {'clips':merged,'status':'completed'}
+    except Exception as e:
+        x=readj(j) or x
+        x['status']='completed';x['progress']=100;x['message']=f'Análisis listo; error al renderizar clips: {e}'
+        writej(j,x)
+        raise HTTPException(500,str(e))
+
 @app.post('/jobs/{j}/query')
 def query(j:str,payload:Dict[str,Any],request:Request):
     auth(request);x=readj(j)
@@ -318,7 +365,7 @@ def library(request:Request):
     auth(request);items=[]
     for p in BASE.iterdir():
         if (p/'job.json').exists():
-            x=readj(p.name);r=x.get('result',{});items.append({'id':p.name,'status':x.get('status'),'team':x.get('team'),'opponent':x.get('opponent'),'duration_seconds':r.get('duration',0),'clips':len(x.get('context',{}).get('clips',[])),'has_video':bool(x.get('source'))})
+            x=readj(p.name);r=x.get('result',{});items.append({'id':p.name,'status':x.get('status'),'team':x.get('team'),'opponent':x.get('opponent'),'duration_seconds':r.get('duration',0),'clips':len(x.get('context',{}).get('clips',[])),'has_video':bool(persisted_source(p.name))})
     return {'items':items}
 
 @app.get('/jobs/{j}/artifacts')
@@ -327,10 +374,12 @@ def artifacts(j:str,request:Request):
     if not p.exists(): raise HTTPException(404,'Job not found')
     return {'artifacts':[{'name':f.name,'size_bytes':f.stat().st_size,'download_url':'/jobs/'+j+'/artifacts/'+f.name} for f in p.iterdir() if f.is_file()]}
 
-@app.get('/jobs/{j}/artifacts/{name}')
+@app.get('/jobs/{j}/artifacts/{name:path}')
 def artifact(j:str,name:str,request:Request):
-    auth(request);p=job_dir(j)/name
-    if not p.exists() or not p.is_file(): raise HTTPException(404,'Artifact not found')
+    auth(request)
+    base=job_dir(j).resolve()
+    p=(base/name).resolve()
+    if base not in p.parents or not p.is_file(): raise HTTPException(404,'Artifact not found')
     from fastapi.responses import FileResponse;return FileResponse(p)
 
 @app.post('/jobs/{j}/archive')
