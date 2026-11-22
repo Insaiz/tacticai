@@ -363,10 +363,26 @@ async def orchestrate(payload:Dict[str,Any],request:Request):
     c=payload.get('context') or {}
     m=c.get('match') or c.get('manual_data') or {}
     v=c.get('video') or {}
-    seq=v.get('sequence') or {}
-    turnovers=seq.get('turnover_candidates') or []
-    transitions=seq.get('transition_candidates') or []
-    clips=c.get('clips') or v.get('clips') or []
+    # Normalize the video evidence shape before reasoning. A completed job
+    # normally exposes sequence/events directly, but older payloads may nest
+    # the analysis under result. This prevents a valid temporal analysis from
+    # being discarded and replaced by a generic "pending evidence" response.
+    seq=v.get('sequence') or (v.get('result') or {}).get('sequence') or {}
+    event_list=v.get('events') or (v.get('result') or {}).get('events') or []
+    turnovers=seq.get('turnover_candidates') or [
+        e for e in event_list if str(e.get('type','')).startswith('turnover')
+    ]
+    transitions=seq.get('transition_candidates') or [
+        e for e in event_list if 'transition' in str(e.get('type',''))
+    ]
+    clips=c.get('clips') or v.get('clips') or (v.get('result') or {}).get('clips') or []
+    # If the temporal windows exist but the explicit candidate lists are absent,
+    # use timestamped events as evidence candidates rather than dropping back
+    # to the insufficient-evidence branch.
+    if seq.get('windows') and not (turnovers or transitions):
+        timestamped=[e for e in event_list if e.get('timestamp') is not None]
+        turnovers=[e for e in timestamped if str(e.get('type','')).startswith('turnover')]
+        transitions=[e for e in timestamped if 'transition' in str(e.get('type',''))]
     facts=[]; evidence=[]; hypotheses=[]
     if m.get('score'): facts.append({'type':'fact','label':'Resultado','value':str(m['score']),'source':'manual_data'})
     if m.get('formation'): facts.append({'type':'fact','label':'Estructura inicial','value':str(m['formation']),'source':'manual_data'})
