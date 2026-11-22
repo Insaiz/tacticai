@@ -18,10 +18,20 @@ app.add_middleware(CORSMiddleware,allow_origins=os.getenv('TACTICAI_CORS_ORIGINS
 def auth(request:Request):
     if TOKEN and request.headers.get('x-tacticai-token')!=TOKEN: raise HTTPException(401,'Invalid worker token')
 def job_dir(j): return BASE/j
-def readj(j): 
+def readj(j):
     p=job_dir(j)/'job.json'
-    return json.loads(p.read_text()) if p.exists() else None
-def writej(j,x): (job_dir(j)/'job.json').write_text(json.dumps(x,ensure_ascii=False,indent=2))
+    if not p.exists(): return None
+    try:
+        return json.loads(p.read_text(encoding='utf-8'))
+    except json.JSONDecodeError:
+        # A concurrent status poll can briefly observe a file while it is being replaced.
+        return None
+
+def writej(j,x):
+    p=job_dir(j)/'job.json'
+    tmp=p.with_name('job.json.tmp')
+    tmp.write_text(json.dumps(x,ensure_ascii=False,indent=2),encoding='utf-8')
+    tmp.replace(p)
 def persisted_source(j):
     x=readj(j) or {}
     name=Path(str(x.get('source',''))).name
