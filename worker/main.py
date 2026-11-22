@@ -355,6 +355,60 @@ async def render_job(j:str,request:Request):
         writej(j,x)
         raise HTTPException(500,str(e))
 
+@app.post('/orchestrate')
+async def orchestrate(payload:Dict[str,Any],request:Request):
+    auth(request)
+    req=str(payload.get('request','')).strip()
+    if not req: raise HTTPException(400,'Falta la petición del entrenador')
+    c=payload.get('context') or {}
+    m=c.get('match') or c.get('manual_data') or {}
+    v=c.get('video') or {}
+    seq=v.get('sequence') or {}
+    turnovers=seq.get('turnover_candidates') or []
+    transitions=seq.get('transition_candidates') or []
+    clips=c.get('clips') or v.get('clips') or []
+    facts=[]; evidence=[]; hypotheses=[]
+    if m.get('score'): facts.append({'type':'fact','label':'Resultado','value':str(m['score']),'source':'manual_data'})
+    if m.get('formation'): facts.append({'type':'fact','label':'Estructura inicial','value':str(m['formation']),'source':'manual_data'})
+    if m.get('losses') is not None: facts.append({'type':'fact','label':'Pérdidas registradas','value':m['losses'],'source':'manual_data'})
+    if turnovers:
+        refs=[str(x.get('clip_id') or x.get('id')) for x in turnovers if x.get('clip_id') or x.get('id')]
+        evidence.append({'type':'evidence','label':'Cambios de posesión candidatos','value':len(turnovers),'source':'video.sequence.turnover_candidates','clip_refs':refs[:10]})
+        by_zone={}
+        for t in turnovers:
+            z=t.get('to_zone') or t.get('from_zone') or 'unknown';by_zone[z]=by_zone.get(z,0)+1
+        if by_zone:
+            z,n=sorted(by_zone.items(),key=lambda kv:kv[1],reverse=True)[0]
+            hypotheses.append({'type':'hypothesis','label':'Concentración de cambios de posesión','value':z,'count':n,'confidence':'medium'})
+        geom=[t.get('post_turnover_geometry') for t in turnovers if t.get('post_turnover_geometry')]
+        if geom:
+            own=[float(g['nearest_losing_team_px']) for g in geom if isinstance(g.get('nearest_losing_team_px'),(int,float))]
+            opp=[float(g['nearest_recovering_team_px']) for g in geom if isinstance(g.get('nearest_recovering_team_px'),(int,float))]
+            avg=lambda a: round(sum(a)/len(a)) if a else None
+            evidence.append({'type':'evidence','label':'Geometría tras cambio de posesión','value':{'samples':len(geom),'avg_losing_team_distance_px':avg(own),'avg_recovering_team_distance_px':avg(opp)},'source':'video.sequence.turnover_candidates.post_turnover_geometry','clip_refs':refs[:10]})
+            if own and opp and avg(own)>avg(opp)+35:
+                hypotheses.append({'type':'hypothesis','label':'Posible reacción defensiva tardía','value':'el equipo que pierde queda más alejado del balón que el equipo que lo recupera en la ventana posterior','confidence':'medium'})
+    if transitions:
+        refs=[str(x.get('clip_id') or x.get('id')) for x in transitions if x.get('clip_id') or x.get('id')]
+        evidence.append({'type':'evidence','label':'Transiciones candidatas','value':len(transitions),'source':'video.sequence.transition_candidates','clip_refs':refs[:10]})
+    q=req.lower(); role=any(k in q for k in ['lateral','extremo','mediocentro','central','delantero','jugador'])
+    if turnovers and transitions:
+        late=any(h['label']=='Posible reacción defensiva tardía' for h in hypotheses)
+        title='Patrón candidato de pérdida + transición con posible reacción tardía' if late else 'Existe un patrón candidato de pérdida seguido de transición'
+        solution='Prioriza comprobar la reacción colectiva tras pérdida: quién salta al balón, quién protege dentro y qué distancia queda entre el jugador que pierde y el balón. La evidencia no permite culpar a un lateral concreto.' if late else 'Revisa los 3–5 segundos posteriores a las pérdidas: distancia al balón, ocupación de carriles, protección central y velocidad de reacción.'
+        task={'title':'Pérdida + transición defensiva','objective':'mejorar la reacción tras pérdida','format':'oleada 5v4+comodines o juego de posición con transición inmediata','coaching_points':['reacción del jugador más cercano','cerrar línea de pase interior','proteger profundidad antes de saltar','reorganización del lado débil']}
+        diagnosis={'title':title,'status':'hypothesis','confidence':'medium','facts':facts,'evidence':evidence,'hypotheses':hypotheses}
+    elif turnovers:
+        diagnosis={'title':'Hay pérdidas candidatas detectadas, pero no basta para atribuir la causa','status':'hypothesis','confidence':'low-medium','facts':facts,'evidence':evidence,'hypotheses':hypotheses}
+        solution='Revisar las pérdidas por zona y la secuencia inmediatamente anterior y posterior antes de señalar a un jugador concreto.';task={'title':'Pérdida y reacción','objective':'mejorar continuidad tras pérdida','format':'posesión con transición de 5–8 segundos','coaching_points':['distancia entre líneas','jugador más cercano al balón','cierre interior']}
+    elif role:
+        diagnosis={'title':'No hay evidencia de vídeo suficiente para confirmar un problema individual','status':'insufficient_evidence','confidence':'low','facts':facts,'evidence':evidence,'hypotheses':hypotheses};solution='No atribuir el problema al jugador todavía. Comparar sus acciones con la estructura colectiva y localizar secuencias concretas.';task=None
+    else:
+        diagnosis={'title':'Diagnóstico pendiente de evidencia temporal','status':'insufficient_evidence','confidence':'low','facts':facts,'evidence':evidence,'hypotheses':hypotheses};solution='Cruzar los datos del partido con secuencias temporales antes de convertir una observación en diagnóstico.';task=None
+    refs=list(dict.fromkeys([str(x.get('id')) for x in clips if x.get('id')]))[:20]
+    response={'answer':diagnosis['title']+'. '+solution,'diagnosis':diagnosis,'solution':solution,'training_task':task,'evidence_to_check':['timestamped_video_evidence','statistical_context'],'follow_up':'Los eventos de vídeo actuales son candidatos; no se presentan como hechos confirmados.','facts':facts,'evidence':evidence,'hypotheses':hypotheses,'clip_refs':refs,'analysis_plan':{'needs_video':bool(turnovers or transitions),'status':'completed'}}
+    return {'mode':'railway-local','plan':{'request':req,'required_sources':['manual_data','video_events','clips'],'execution':{'needs_video':bool(turnovers or transitions)},'status':'completed'},'response':response}
+
 @app.post('/jobs/{j}/query')
 def query(j:str,payload:Dict[str,Any],request:Request):
     auth(request);x=readj(j)
