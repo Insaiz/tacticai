@@ -3,7 +3,7 @@ import os,json,uuid,shutil,subprocess,math
 import cv2
 from pathlib import Path
 from typing import Any,Dict
-from fastapi import FastAPI,UploadFile,File,Form,HTTPException,Request
+from fastapi import FastAPI,UploadFile,File,Form,HTTPException,Request,Response
 from fastapi.middleware.cors import CORSMiddleware
 from football_engine import build_analysis
 
@@ -13,7 +13,7 @@ BASE=Path(os.getenv('TACTICAI_DATA','/data'));BASE.mkdir(parents=True,exist_ok=T
 import tempfile
 TOKEN=os.getenv('TACTICAI_WORKER_TOKEN','')
 app=FastAPI(title='TacticAI Worker',version='1.8')
-app.add_middleware(CORSMiddleware,allow_origins=os.getenv('TACTICAI_CORS_ORIGINS','*').split(','),allow_methods=['*'],allow_headers=['*'])
+ALLOWED_ORIGINS=[x.strip() for x in os.getenv('TACTICAI_CORS_ORIGINS','*').split(',') if x.strip()]\napp.add_middleware(CORSMiddleware,allow_origins=ALLOWED_ORIGINS,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['*'],allow_credentials=False,max_age=86400)\n\n@app.options('/{full_path:path}')\nasync def cors_preflight(full_path:str):\n    return Response(status_code=204,headers={\n        'Access-Control-Allow-Origin':'*',\n        'Access-Control-Allow-Methods':'GET,POST,PUT,PATCH,DELETE,OPTIONS',\n        'Access-Control-Allow-Headers':'*',\n        'Access-Control-Max-Age':'86400',\n    })
 
 def auth(request:Request):
     if TOKEN and request.headers.get('x-tacticai-token')!=TOKEN: raise HTTPException(401,'Invalid worker token')
