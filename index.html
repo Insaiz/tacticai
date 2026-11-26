@@ -12,7 +12,23 @@ document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>nav(b.dataset.
 function save(){localStorage.setItem('tacticai',JSON.stringify(S));refresh()}function saveData(){S.data={team:$('team').value,opponent:$('opp').value,score:$('score').value,possession:+$('pos').value,xg:+$('xg').value,xga:+$('xga').value,shots:+$('shots').value,sot:+$('sot').value,passes:+$('passes').value,pass_accuracy:+$('acc').value,high_recoveries:+$('high').value,losses:+$('losses').value,ppda:+$('ppda').value,formation:$('formation').value,coach_observations:$('notes').value};save();alert('Contexto guardado')}
 function refresh(){const d=S.data||{};$('sideCtx').textContent=d.team?d.team+' vs '+d.opponent+' · '+d.score:'Sin partido';$('contextBox').innerHTML=d.team?Object.entries(d).map(([k,v])=>'<span class="pill">'+esc(k)+': '+esc(v)+'</span>').join(''):'Sin contexto';$('kpis').innerHTML=d.team?[['xG',d.xg],['xGA',d.xga],['Pérdidas',d.losses],['PPDA',d.ppda]].map(x=>'<div class="stat"><div class="num">'+esc(x[1])+'</div><div class="lbl">'+esc(x[0])+'</div></div>').join(''):'';renderEvidence();renderChat()}
 function context(){return{match:S.data,problems:S.problems||[],video:S.video||null,clips:S.clips||[],evidence_ledger:S.evidence||[],mission:S.mission||null}}
-async function apiFetch(path,options={}){const bases=['https://tacticai-proxy.mariofsaizbaez.workers.dev','https://tacticai-worker-production.up.railway.app'];let lastError=null;for(const base of bases){const url=base+path;try{const opts=Object.assign({mode:'cors',cache:'no-store'},options);const r=await fetch(url,opts);const raw=await r.text();let body={};try{body=raw?JSON.parse(raw):{}}catch(_){body={raw:raw.slice(0,1000)}}if(!r.ok){throw new Error('HTTP '+r.status+' · '+(body.error||body.message||body.raw||'Respuesta del servidor'))}return body}catch(e){lastError=e}}if(lastError instanceof TypeError)throw new Error('No se pudo conectar con el API de TacticAI. Se probaron Cloudflare y Railway y el navegador no recibió una respuesta.');throw lastError}
+async function apiFetch(path,options={}){
+  const base='https://tacticai-worker-production.up.railway.app';
+  const url=base+path;
+  try{
+    const opts=Object.assign({mode:'cors',cache:'no-store'},options);
+    const r=await fetch(url,opts);
+    const raw=await r.text();
+    let body={};
+    try{body=raw?JSON.parse(raw):{}}catch(_){body={raw:raw.slice(0,1000)}}
+    if(!r.ok) throw new Error('HTTP '+r.status+' · '+(body.error||body.message||body.raw||'Respuesta del servidor'));
+    return body;
+  }catch(e){
+    if(e instanceof TypeError)
+      throw new Error('No se pudo conectar con Railway ('+url+'). Comprueba CORS, /health y que el navegador pueda acceder al Worker.');
+    throw e;
+  }
+}
 async function mission(){const q=$('goal').value.trim();if(!q)return;S.mission={request:q,status:'running'};save();$('mission').innerHTML='<div class="notice">Orquestando evidencia…</div>';try{const j=await apiFetch('/orchestrate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({request:q,context:context()})});S.mission=j.response;S.problems=S.problems||[];if(j.response?.diagnosis)S.problems.unshift(j.response.diagnosis);save();$('mission').innerHTML=renderMissionResult(j.response||{})}catch(e){$('mission').innerHTML='<div class="notice">No se pudo contactar con el orquestador: '+esc(e.message)+'</div>'}}
 async function sendChat(){const q=$('chatInput').value.trim();if(!q)return;add(q,true);$('chatInput').value='';try{const j=await apiFetch('/orchestrate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({request:q,context:context()})});add(j.response?.answer||'Sin respuesta',false)}catch(e){add('No se pudo contactar con TacticAI: '+e.message,false)}}
 function add(t,me){S.chat.push({role:me?'coach':'tacticai',text:t});save();renderChat()}
