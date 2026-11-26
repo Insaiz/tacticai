@@ -174,13 +174,25 @@ def upload_init(request:Request, project_id:str=Form(''), team:str=Form(''), opp
     j=project_id or str(uuid.uuid4())
     job_dir(j).mkdir(parents=True,exist_ok=True)
     ext=Path(filename or 'video.mp4').suffix or '.mp4'
-    src=Path(tempfile.gettempdir())/('tacticai-'+j+ext)
+    # Keep the upload in the persistent Railway volume from the start.
+    # Using /tmp here made the upload depend on the container's ephemeral
+    # filesystem and also made init harder to diagnose after restarts.
+    src=job_dir(j)/('source'+ext)
     try:
         if src.exists(): src.unlink()
-    except Exception: pass
-    old=readj(j) or {'id':j,'project_id':j,'context':{'manual_data':{},'problems':[],'chat':[],'clips':[],'evidence_ledger':[]}}
-    old.update({'status':'uploading','message':'Preparando subida por bloques','progress':0,'source':src.name,'sample_fps':sample_fps,'team':team,'opponent':opponent,'upload_total_chunks':total_chunks,'upload_received_chunks':0})
-    old['context']['video']={'source':src.name,'team':team,'opponent':opponent}
+    except Exception:
+        pass
+    defaults={'id':j,'project_id':j,'context':{'manual_data':{},'problems':[],'chat':[],'clips':[],'evidence_ledger':[]}}
+    old=readj(j) or defaults
+    ctx=old.get('context')
+    if not isinstance(ctx,dict):
+        ctx=defaults['context'].copy()
+        old['context']=ctx
+    for key,default in defaults['context'].items():
+        if key not in ctx:
+            ctx[key]=default.copy() if isinstance(default,dict) else list(default) if isinstance(default,list) else default
+    old.update({'id':j,'project_id':j,'status':'uploading','message':'Preparando subida por bloques','progress':0,'source':src.name,'sample_fps':sample_fps,'team':team,'opponent':opponent,'upload_total_chunks':total_chunks,'upload_received_chunks':0})
+    ctx['video']={'source':src.name,'team':team,'opponent':opponent}
     writej(j,old)
     src.touch()
     return {'id':j,'project_id':j,'status':'uploading','total_chunks':total_chunks}
